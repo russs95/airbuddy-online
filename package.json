@@ -1,13 +1,15 @@
 {
   "name": "airbuddy-online",
   "version": "1.0.0",
-  "description": "The public web server development for the  [airBuddy 2.1 open source hardware project]([https://github.com/russs95/airbuddy-online](https://github.com/russs95/airbuddy_v2/)).",
-  "main": "index.js",
+  "description": "AirBuddy Online API and dashboard for the airBuddy 2.1 open-source hardware project.",
+  "main": "server.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["airbuddy", "air-quality", "iot", "earthen"],
+  "author": "Russ",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^17.3.1",
