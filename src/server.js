@@ -1,12 +1,14 @@
-// server.js
-// AirBuddy Online API (minimal v1 - patched)
-
-import crypto from "node:crypto";
+// src/server.js
 import express from "express";
-import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 import helmet from "helmet";
 import morgan from "morgan";
+
+import { makePool } from "./db/pool.js";
+import { deviceAuth } from "./middleware/deviceAuth.js";
+import { telemetryRouter } from "./routes/telemetry.js";
+import { deviceRouter } from "./routes/device.js";
+import { systemRouter } from "./routes/system.js";
 
 dotenv.config();
 
@@ -16,245 +18,148 @@ app.use(morgan("tiny"));
 app.use(express.json({ limit: "256kb" }));
 
 const startedAt = Date.now();
+const { PORT = 3000 } = process.env;
 
-const {
-    PORT = 3000,
-    DB_HOST,
-    DB_PORT = 3306,
-    DB_NAME,
-    DB_USER,
-    DB_PASS,
-} = process.env;
-
-if (!DB_HOST || !DB_NAME || !DB_USER) {
-    console.error("Missing DB env vars. Check .env");
+let pool;
+try {
+    pool = makePool(process.env);
+} catch (e) {
+    console.error(e.message || e);
     process.exit(1);
 }
 
-const pool = mysql.createPool({
-    host: DB_HOST,
-    port: Number(DB_PORT),
-    user: DB_USER,
-    password: DB_PASS,
-    database: DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    timezone: "Z",
-});
-
 // ------------------------
-// Helpers
+// Main landing (air.earthen.io/)
+// Shows 5 latest telemetry records
 // ------------------------
-
-function sha256Hex(str) {
-    return crypto.createHash("sha256").update(str, "utf8").digest("hex");
-}
-
-function requireHeader(req, name) {
-    const v = req.get(name);
-    return v && String(v).trim() ? String(v).trim() : null;
-}
-
-function isFiniteNumber(x) {
-    return typeof x === "number" && Number.isFinite(x);
-}
-
-function toMySQLDatetimeFromUnixSeconds(sec) {
-    const d = new Date(sec * 1000);
-    const pad = (n) => String(n).padStart(2, "0");
-    return (
-        `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
-        `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
-    );
-}
-
-function validateTelemetryBody(body) {
-    if (!body || typeof body !== "object") return "Body must be a JSON object";
-
-    const { recorded_at, values, confidence, flags, lat, lon, alt_m } = body;
-
-    if (typeof recorded_at !== "number" || !Number.isFinite(recorded_at)) {
-        return "`recorded_at` must be a unix timestamp number (seconds)";
-    }
-
-    if (recorded_at < 946684800 || recorded_at > 4102444800) {
-        return "`recorded_at` out of expected range";
-    }
-
-    if (!values || typeof values !== "object" || Array.isArray(values)) {
-        return "`values` must be an object";
-    }
-
-    if (Object.keys(values).length === 0) {
-        return "`values` must not be empty";
-    }
-
-    if (confidence && (typeof confidence !== "object" || Array.isArray(confidence))) {
-        return "`confidence` must be an object if provided";
-    }
-
-    if (flags && (typeof flags !== "object" || Array.isArray(flags))) {
-        return "`flags` must be an object if provided";
-    }
-
-    if (lat !== undefined && lat !== null && !isFiniteNumber(lat)) return "`lat` must be a number";
-    if (lon !== undefined && lon !== null && !isFiniteNumber(lon)) return "`lon` must be a number";
-    if (alt_m !== undefined && alt_m !== null && !isFiniteNumber(alt_m)) return "`alt_m` must be a number";
-
-    return null;
-}
-
-// ------------------------
-// Health & Liveness
-// ------------------------
-
-app.get("/api/live", (req, res) => {
-    res.status(200).json({
-        ok: true,
-        service: "airbuddy-online",
-        ts: Date.now(),
-    });
-});
-
-app.get("/api/health", async (req, res) => {
-    const base = {
-        service: "airbuddy-online",
-        uptime_s: Math.floor((Date.now() - startedAt) / 1000),
-        ts: Date.now(),
-    };
-
+app.get("/", async (req, res) => {
     try {
-        await pool.query("SELECT 1");
-        return res.status(200).json({
-            ok: true,
-            db: true,
-            ...base,
-        });
-    } catch (e) {
-        return res.status(503).json({
-            ok: false,
-            db: false,
-            error: "db_unreachable",
-            ...base,
-        });
-    }
-});
-
-// ------------------------
-// Telemetry Ingestion
-// ------------------------
-
-app.post("/api/v1/telemetry", async (req, res) => {
-    const deviceUid = requireHeader(req, "X-Device-Id");
-    const deviceKey = requireHeader(req, "X-Device-Key");
-
-    if (!deviceUid || !deviceKey) {
-        return res.status(401).json({ ok: false, error: "missing_device_auth" });
-    }
-
-    const err = validateTelemetryBody(req.body);
-    if (err) {
-        return res.status(400).json({ ok: false, error: "bad_payload", message: err });
-    }
-
-    const keyHash = sha256Hex(deviceKey);
-    const recordedAt = toMySQLDatetimeFromUnixSeconds(req.body.recorded_at);
-
-    const lat = req.body.lat ?? null;
-    const lon = req.body.lon ?? null;
-    const altM = req.body.alt_m ?? null;
-
-    const valuesJson = JSON.stringify(req.body.values);
-    const confidenceJson = req.body.confidence ? JSON.stringify(req.body.confidence) : null;
-    const flagsJson = req.body.flags ? JSON.stringify(req.body.flags) : null;
-
-    const conn = await pool.getConnection();
-
-    try {
-        await conn.beginTransaction();
-
-        // 1) Fetch device
-        const [devRows] = await conn.query(
-            "SELECT device_id, status FROM devices_tb WHERE device_uid = ? LIMIT 1",
-            [deviceUid]
+        // NOTE: This assumes telemetry_readings_tb has:
+        // reading_id (or telemetry_id), device_id, recorded_at, values_json, confidence_json, flags_json
+        // If your PK is named differently, just remove it from SELECT.
+        const [rows] = await pool.query(
+            `
+      SELECT
+        tr.device_id,
+        tr.recorded_at,
+        tr.values_json,
+        tr.confidence_json,
+        tr.flags_json
+      FROM telemetry_readings_tb tr
+      ORDER BY tr.recorded_at DESC
+      LIMIT 5
+      `
         );
 
-        if (!devRows.length) {
-            await conn.rollback();
-            return res.status(401).json({ ok: false, error: "unknown_device" });
-        }
+        // Quick HTML (simple + safe)
+        const esc = (s) =>
+            String(s)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
 
-        const device = devRows[0];
-
-        if (device.status !== "active") {
-            await conn.rollback();
-            return res.status(401).json({ ok: false, error: "device_not_active" });
-        }
-
-        // 2) Validate device key
-        const [keyRows] = await conn.query(
-            `SELECT device_key_id
-       FROM device_keys_tb
-       WHERE device_id = ?
-         AND key_hash = ?
-         AND revoked_at IS NULL
-       LIMIT 1`,
-            [device.device_id, keyHash]
-        );
-
-        if (!keyRows.length) {
-            await conn.rollback();
-            return res.status(401).json({ ok: false, error: "invalid_device_key" });
-        }
-
-        // 3) Insert telemetry (idempotent via unique constraint)
-        try {
-            await conn.query(
-                `INSERT INTO telemetry_readings_tb
-         (device_id, recorded_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
-         VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
-                [
-                    device.device_id,
-                    recordedAt,
-                    lat,
-                    lon,
-                    altM,
-                    valuesJson,
-                    confidenceJson,
-                    flagsJson,
-                ]
-            );
-        } catch (e) {
-            if (e.code !== "ER_DUP_ENTRY") {
-                throw e;
+        const prettyJson = (v) => {
+            if (v == null) return "";
+            try {
+                const obj = typeof v === "string" ? JSON.parse(v) : v;
+                return JSON.stringify(obj, null, 2);
+            } catch {
+                return String(v);
             }
-            // Duplicate insert → ignore (idempotent behavior)
-        }
+        };
 
-        // 4) Update last_seen
-        await conn.query(
-            "UPDATE devices_tb SET last_seen_at = NOW() WHERE device_id = ?",
-            [device.device_id]
-        );
+        const cards = rows
+            .map((r) => {
+                const values = esc(prettyJson(r.values_json));
+                const conf = esc(prettyJson(r.confidence_json));
+                const flags = esc(prettyJson(r.flags_json));
 
-        await conn.commit();
+                return `
+          <div class="card">
+            <div class="meta">
+              <div><b>device_id:</b> ${esc(r.device_id)}</div>
+              <div><b>recorded_at:</b> ${esc(r.recorded_at)}</div>
+            </div>
 
-        return res.status(200).json({ ok: true });
+            <details open>
+              <summary><b>values_json</b></summary>
+              <pre>${values}</pre>
+            </details>
 
+            ${conf ? `
+              <details>
+                <summary><b>confidence_json</b></summary>
+                <pre>${conf}</pre>
+              </details>
+            ` : ""}
+
+            ${flags ? `
+              <details>
+                <summary><b>flags_json</b></summary>
+                <pre>${flags}</pre>
+              </details>
+            ` : ""}
+          </div>
+        `;
+            })
+            .join("\n");
+
+        const html = `
+      <!doctype html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>AirBuddy Online</title>
+        <style>
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; }
+          h1 { margin: 0 0 6px; }
+          .sub { color: #555; margin: 0 0 18px; }
+          .links a { margin-right: 12px; }
+          .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }
+          .meta { display: flex; gap: 20px; flex-wrap: wrap; color: #333; margin-bottom: 10px; }
+          pre { background: #f6f6f6; padding: 10px; border-radius: 8px; overflow:auto; }
+          details > summary { cursor: pointer; }
+        </style>
+      </head>
+      <body>
+        <h1>AirBuddy Online</h1>
+        <p class="sub">Latest telemetry (most recent 5 readings)</p>
+
+        <p class="links">
+          <a href="/api/live">/api/live</a>
+          <a href="/api/health">/api/health</a>
+        </p>
+
+        ${rows.length ? cards : `<p>No telemetry readings yet.</p>`}
+      </body>
+      </html>
+    `;
+
+        res.status(200).type("html").send(html);
     } catch (e) {
-        try { await conn.rollback(); } catch {}
-        console.error("telemetry error:", e?.code || e?.message || e);
-        return res.status(500).json({ ok: false, error: "server_error" });
-    } finally {
-        conn.release();
+        console.error("GET / landing error:", e?.code || e?.message || e);
+        res.status(500).type("text").send("server_error");
     }
 });
+
+// ------------------------
+// System routes (/api/live, /api/health)
+// ------------------------
+app.use("/api", systemRouter(pool, startedAt));
+
+// ------------------------
+// API v1 (authenticated)
+// ------------------------
+// Cleaner boundary: auth only applies to /api/v1/*
+app.use("/api", deviceAuth(pool), telemetryRouter(pool));
+app.use("/api", deviceAuth(pool), deviceRouter(pool));
 
 // ------------------------
 // Start Server (behind nginx)
 // ------------------------
-
 app.listen(Number(PORT), "127.0.0.1", () => {
     console.log(`AirBuddy Online API listening on http://127.0.0.1:${PORT}`);
 });
