@@ -20,7 +20,6 @@ app.use(express.json({ limit: "256kb" }));
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
 
-// Always format display in Jakarta, regardless of OS timezone
 const DISPLAY_TZ = "Asia/Jakarta";
 
 let pool;
@@ -42,15 +41,33 @@ const esc = (s) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 
+// FIXED: MySQL JSON may already be an object in Node (mysql2 does this).
 const safeJsonParse = (v) => {
     if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v !== "string") return null;
-    try {
-        return JSON.parse(v);
-    } catch {
-        return null;
+
+    // Already parsed object
+    if (typeof v === "object") {
+        // Handle Buffer (rare for JSON, but safe)
+        if (Buffer.isBuffer(v)) {
+            try {
+                return JSON.parse(v.toString("utf8"));
+            } catch {
+                return null;
+            }
+        }
+        return v;
     }
+
+    // String JSON
+    if (typeof v === "string") {
+        try {
+            return JSON.parse(v);
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
 };
 
 const fmtJakarta = (d) => {
@@ -111,64 +128,28 @@ const fmtVal = (x, digits = 1) => {
 };
 
 // ------------------------
-// Device summary fetch (best-effort)
-// show: device_id, name, home, room
+// Device summary fetch (schema-aligned to your tables)
 // ------------------------
 async function fetchDeviceSummary(pool, deviceId = 1) {
-    const tries = [
-        {
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          h.home_name AS home_name,
-          r.room_name AS room_name
-        FROM devices_tb d
-        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-        LEFT JOIN homes_tb h ON h.home_id = d.home_id
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-        {
-            // If device doesn't store home_id directly; room links to home
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          h.home_name AS home_name,
-          r.room_name AS room_name
-        FROM devices_tb d
-        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-        LEFT JOIN homes_tb h ON h.home_id = r.home_id
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-        {
-            // Minimal
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          NULL AS home_name,
-          NULL AS room_name
-        FROM devices_tb d
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-    ];
-
-    for (const t of tries) {
-        try {
-            const [rows] = await pool.query(t.sql, [deviceId]);
-            if (rows && rows.length) return rows[0];
-        } catch {
-            // try next
-        }
+    // Your schema: devices_tb has home_id, room_id.
+    const sql = `
+    SELECT
+      d.device_id AS device_id,
+      d.device_name AS device_name,
+      h.home_name AS home_name,
+      r.room_name AS room_name
+    FROM devices_tb d
+    LEFT JOIN homes_tb h ON h.home_id = d.home_id
+    LEFT JOIN rooms_tb r ON r.room_id = d.room_id
+    WHERE d.device_id = ?
+    LIMIT 1
+  `;
+    try {
+        const [rows] = await pool.query(sql, [deviceId]);
+        return rows && rows.length ? rows[0] : null;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 // ------------------------
@@ -176,49 +157,30 @@ async function fetchDeviceSummary(pool, deviceId = 1) {
 // ------------------------
 app.get("/", async (req, res) => {
     try {
-        // Device info for device_id = 1 (for header)
         const deviceSummary = await fetchDeviceSummary(pool, 1);
 
-        // Latest 10 by received_at (preferred). Fallback to recorded_at if needed.
-        let rows = [];
-        try {
-            const [r] = await pool.query(
-                `
-        SELECT
-          tr.device_id,
-          tr.received_at,
-          tr.values_json
-        FROM telemetry_readings_tb tr
-        ORDER BY tr.received_at DESC
-        LIMIT 10
-        `
-            );
-            rows = r;
-        } catch {
-            const [r] = await pool.query(
-                `
-        SELECT
-          tr.device_id,
-          tr.recorded_at AS received_at,
-          tr.values_json
-        FROM telemetry_readings_tb tr
-        ORDER BY tr.recorded_at DESC
-        LIMIT 10
-        `
-            );
-            rows = r;
-        }
+        // Latest 10 by received_at for device_id=1 (since header is device 1)
+        const [rows] = await pool.query(
+            `
+      SELECT
+        tr.device_id,
+        tr.received_at,
+        tr.values_json
+      FROM telemetry_readings_tb tr
+      WHERE tr.device_id = 1
+      ORDER BY tr.received_at DESC
+      LIMIT 10
+      `
+        );
 
         const now = new Date();
 
-        // One time line only (requested format)
         const serverTimeLine = `
       <div class="servertime">
         <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
       </div>
     `;
 
-        // Device info directly under server time
         const deviceLine = `
       <div class="deviceinfo">
         ${
@@ -232,34 +194,37 @@ app.get("/", async (req, res) => {
           <span class="dot">•</span>
           <b>ID:</b> ${esc(deviceSummary.device_id)}
         `
-                : `<span class="muted">(device_id=1 not found — update device summary query/table names)</span>`
+                : `<span class="muted">(device_id=1 not found)</span>`
         }
       </div>
     `;
 
-        // Chart series in chronological order (oldest -> newest)
+        // Build series in chronological order (oldest -> newest)
         const chronological = [...rows].reverse();
 
-        const labels = chronological.map((r) =>
-            r?.received_at ? fmtJakarta(r.received_at) : ""
-        );
+        const labels = [];
+        const temps = [];
+        const rhs = [];
+        const eco2s = [];
 
-        const temps = chronological.map((r) => {
+        for (const r of chronological) {
+            labels.push(r?.received_at ? fmtJakarta(r.received_at) : "");
+
             const obj = safeJsonParse(r.values_json);
-            return nOrNull(obj?.temp_c);
-        });
+            const core = pickCore(obj);
 
-        const rhs = chronological.map((r) => {
-            const obj = safeJsonParse(r.values_json);
-            return nOrNull(obj?.rh);
-        });
+            temps.push(core.temp_c);
+            rhs.push(core.rh);
+            eco2s.push(core.eco2_ppm);
+        }
 
-        const eco2s = chronological.map((r) => {
-            const obj = safeJsonParse(r.values_json);
-            return nOrNull(obj?.eco2_ppm);
-        });
+        const countNonNull = (arr) => arr.reduce((a, v) => a + (v == null ? 0 : 1), 0);
+        const pointsInfo = {
+            temp: countNonNull(temps),
+            rh: countNonNull(rhs),
+            eco2: countNonNull(eco2s),
+        };
 
-        // IMPORTANT FIX: embed JSON as application/json script block (no HTML escaping)
         const chartDataJson = JSON.stringify({
             labels,
             temps,
@@ -267,11 +232,10 @@ app.get("/", async (req, res) => {
             eco2s,
         });
 
-        // Entries (latest first)
         const entriesHtml = rows
             .map((r) => {
-                const valuesObj = safeJsonParse(r.values_json);
-                const core = pickCore(valuesObj);
+                const obj = safeJsonParse(r.values_json);
+                const core = pickCore(obj);
 
                 return `
           <div class="entry">
@@ -305,100 +269,38 @@ app.get("/", async (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>AirBuddy Online</title>
         <style>
-          :root {
-            --border: #e6e6e6;
-            --muted: #666;
-            --bg: #fff;
-            --panel: #fafafa;
-          }
-          body {
-            font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
-            margin: 24px;
-            color: #111;
-            background: var(--bg);
-          }
+          :root { --border:#e6e6e6; --muted:#666; --panel:#fafafa; }
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; color:#111; }
           h1 { margin: 0 0 6px; }
           .sub { color: var(--muted); margin: 0 0 18px; }
           .links a { margin-right: 12px; }
 
-          .servertime {
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 12px 14px;
-            background: var(--panel);
-            margin: 14px 0 10px;
-          }
-          .deviceinfo {
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 12px 14px;
-            background: #fff;
-            margin: 0 0 18px;
-            color: #222;
-          }
+          .servertime { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--panel); margin: 14px 0 10px; }
+          .deviceinfo { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: #fff; margin: 0 0 18px; color: #222; }
           .deviceinfo .dot { margin: 0 8px; color: #bbb; }
           .muted { color: var(--muted); }
 
-          .chartwrap {
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 14px;
-            margin: 0 0 18px;
-          }
-          .charttitle {
-            display:flex;
-            justify-content: space-between;
-            align-items: baseline;
-            gap: 12px;
-            margin-bottom: 10px;
-          }
+          .chartwrap { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 0 0 18px; }
+          .charttitle { display:flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
           .charttitle b { font-size: 16px; }
           .legend { color: var(--muted); font-size: 13px; }
+          .points { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
           canvas { width: 100%; height: 260px; display: block; }
 
-          .entry {
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 14px;
-            margin: 12px 0;
-            background: #fff;
-          }
-          .entry-head {
-            display:flex;
-            justify-content: space-between;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-bottom: 10px;
-          }
+          .entry { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 12px 0; background: #fff; }
+          .entry-head { display:flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 
-          table.core {
-            width: 100%;
-            border-collapse: collapse;
-            overflow: hidden;
-            border-radius: 10px;
-          }
-          table.core th, table.core td {
-            text-align: left;
-            padding: 10px 10px;
-            border-top: 1px solid var(--border);
-            vertical-align: top;
-          }
-          table.core tr:first-child th, table.core tr:first-child td {
-            border-top: none;
-          }
-          table.core th {
-            width: 140px;
-            color: #222;
-            background: #fcfcfc;
-            font-weight: 600;
-          }
+          table.core { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 10px; }
+          table.core th, table.core td { text-align: left; padding: 10px 10px; border-top: 1px solid var(--border); vertical-align: top; }
+          table.core tr:first-child th, table.core tr:first-child td { border-top: none; }
+          table.core th { width: 140px; color: #222; background: #fcfcfc; font-weight: 600; }
 
           .footerline { margin-top: 18px; color: var(--muted); font-size: 13px; }
         </style>
       </head>
       <body>
         <h1>AirBuddy Online</h1>
-        <p class="sub">Last 10 telemetry readings (ordered by <b>received_at</b>)</p>
+        <p class="sub">Last 10 telemetry readings (device_id=1, ordered by <b>received_at</b>)</p>
 
         <p class="links">
           <a href="/api/live">/api/live</a>
@@ -417,6 +319,9 @@ app.get("/", async (req, res) => {
               eCO₂ = <span style="color:#6a1b9a;font-weight:600;">purple</span>
             </div>
           </div>
+          <div class="points">
+            Points found: temp=${pointsInfo.temp}/10 • rh=${pointsInfo.rh}/10 • eco2=${pointsInfo.eco2}/10
+          </div>
           <canvas id="trend"></canvas>
         </div>
 
@@ -424,9 +329,7 @@ app.get("/", async (req, res) => {
 
         ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
 
-        <div class="footerline">
-          Tip: received_at reflects when the server got the packet (best when device RTC is missing).
-        </div>
+        <div class="footerline">received_at is server time — ideal when device RTC is missing.</div>
 
         <script>
           (function () {
@@ -527,26 +430,20 @@ app.get("/", async (req, res) => {
               ctx.lineTo(padL + plotW, padT + plotH);
               ctx.stroke();
 
-              // Labels (minimal)
+              // Minimal labels
               ctx.fillStyle = "#666";
               ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif";
-
-              // Left labels for Temp
               ctx.fillText(tMM.max.toFixed(1) + "°C", 6, padT + 4);
               ctx.fillText(tMM.min.toFixed(1) + "°C", 6, padT + plotH);
-
-              // Right labels for RH
               ctx.fillText(rMM.max.toFixed(1) + "%", padL + plotW + 6, padT + 4);
               ctx.fillText(rMM.min.toFixed(1) + "%", padL + plotW + 6, padT + plotH);
 
-              // eCO2 labels (bottom-left of plot area, subtle)
-              ctx.fillText("CO₂ " + cMM.min.toFixed(0) + "–" + cMM.max.toFixed(0) + " ppm", padL + 6, padT + plotH + 18);
+              // Lines
+              drawLine(data.temps || [], yTemp, "#c62828");
+              drawLine(data.rhs   || [], yRh,   "#1565c0");
+              drawLine(data.eco2s || [], yCo2,  "#6a1b9a");
 
-              // Lines + points (requested colors)
-              drawLine(data.temps || [], yTemp, "#c62828"); // red
-              drawLine(data.rhs   || [], yRh,   "#1565c0"); // blue
-              drawLine(data.eco2s || [], yCo2,  "#6a1b9a"); // purple
-
+              // Points
               drawPoints(data.temps || [], yTemp, "#c62828");
               drawPoints(data.rhs   || [], yRh,   "#1565c0");
               drawPoints(data.eco2s || [], yCo2,  "#6a1b9a");
