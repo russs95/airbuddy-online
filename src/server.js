@@ -20,7 +20,6 @@ app.use(express.json({ limit: "256kb" }));
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
 
-// Always format display in Jakarta, regardless of OS timezone
 const DISPLAY_TZ = "Asia/Jakarta";
 
 let pool;
@@ -32,7 +31,7 @@ try {
 }
 
 // ------------------------
-// Helpers (landing page)
+// Helpers
 // ------------------------
 const esc = (s) =>
     String(s)
@@ -53,23 +52,14 @@ const safeJsonParse = (v) => {
     }
 };
 
-const prettyJson = (v) => {
-    if (v == null) return "";
-    try {
-        const obj = typeof v === "string" ? JSON.parse(v) : v;
-        return JSON.stringify(obj, null, 2);
-    } catch {
-        return String(v);
-    }
-};
-
-const fmtDate = (d, timeZone) => {
+const fmtJakarta = (d) => {
     if (!d) return "";
     const dt = d instanceof Date ? d : new Date(d);
     if (Number.isNaN(dt.getTime())) return String(d);
 
-    return new Intl.DateTimeFormat("en-GB", {
-        timeZone,
+    // Example: 20 Feb 2026, 01:07:35 GMT+7
+    const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: DISPLAY_TZ,
         year: "numeric",
         month: "short",
         day: "2-digit",
@@ -78,147 +68,56 @@ const fmtDate = (d, timeZone) => {
         second: "2-digit",
         hour12: false,
         timeZoneName: "short",
-    }).format(dt);
+    }).formatToParts(dt);
+
+    const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
+    const day = get("day");
+    const month = get("month");
+    const year = get("year");
+    const hour = get("hour");
+    const minute = get("minute");
+    const second = get("second");
+    const tz = get("timeZoneName");
+
+    return `${day} ${month} ${year}, ${hour}:${minute}:${second} ${tz}`;
 };
 
-const coerceDeviceTime = (valuesObj) => {
-    if (!valuesObj || typeof valuesObj !== "object") return null;
+const nOrNull = (x) => {
+    if (x == null) return null;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+};
 
-    const candidates = [
-        "device_time",
-        "device_time_iso",
-        "device_timestamp",
-        "timestamp",
-        "ts",
-        "time",
-        "iso_time",
-        "datetime",
-        "rtc_iso",
-        "rtc_time",
-        "device_epoch",
-        "epoch",
-        "epoch_s",
-        "epoch_ms",
-    ];
+const pickCore = (valuesObj) => {
+    const v = valuesObj && typeof valuesObj === "object" ? valuesObj : {};
+    return {
+        temp_c: nOrNull(v.temp_c),
+        rh: nOrNull(v.rh),
+        eco2_ppm: nOrNull(v.eco2_ppm),
+        tvoc_ppb: nOrNull(v.tvoc_ppb),
+        aqi: nOrNull(v.aqi),
+        confidence: nOrNull(v.confidence),
+        ready: v.ready,
+        rtc_temp_c: nOrNull(v.rtc_temp_c),
+    };
+};
 
-    let raw = null;
-    for (const k of candidates) {
-        if (valuesObj[k] != null) {
-            raw = valuesObj[k];
-            break;
-        }
+const fmtVal = (x, digits = 1) => {
+    if (x == null) return "—";
+    if (typeof x === "boolean") return x ? "true" : "false";
+    if (typeof x === "number") {
+        // Humidity could be 76.33171 (keep 1 decimal looks nice)
+        return Number.isFinite(x) ? x.toFixed(digits) : "—";
     }
-    if (raw == null) return null;
-
-    if (
-        typeof raw === "number" ||
-        (typeof raw === "string" &&
-            raw.trim() !== "" &&
-            !Number.isNaN(Number(raw)))
-    ) {
-        const n = typeof raw === "number" ? raw : Number(raw);
-        const ms = n >= 1e12 ? n : n * 1000;
-        const dt = new Date(ms);
-        if (!Number.isNaN(dt.getTime())) {
-            return {
-                raw,
-                date: dt,
-                kind: n >= 1e12 ? "epoch_ms" : "epoch_s",
-            };
-        }
-    }
-
-    if (typeof raw === "string") {
-        const dt = new Date(raw);
-        if (!Number.isNaN(dt.getTime())) {
-            return { raw, date: dt, kind: "date_string" };
-        }
-    }
-
-    return { raw, date: null, kind: "unknown" };
+    return String(x);
 };
 
 // ------------------------
-// Device summary fetch (best-effort)
-// ------------------------
-async function fetchDeviceSummary(pool, deviceId = 1) {
-    // We don't know your exact schema names here, so we try common possibilities.
-    // If it fails, we return null and the UI shows "not found".
-    const tries = [
-        {
-            label: "devices_tb + rooms_tb + homes_tb + communities_tb",
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          h.home_name AS home_name,
-          r.room_name AS room_name,
-          c.community_name AS community_name
-        FROM devices_tb d
-        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-        LEFT JOIN homes_tb h ON h.home_id = d.home_id
-        LEFT JOIN communities_tb c ON c.community_id = d.community_id
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-        {
-            // If device links to room, and room links to home
-            label: "devices_tb + rooms_tb + homes_tb",
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          h.home_name AS home_name,
-          r.room_name AS room_name,
-          NULL AS community_name
-        FROM devices_tb d
-        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-        LEFT JOIN homes_tb h ON h.home_id = r.home_id
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-        {
-            // Very minimal: just device table
-            label: "devices_tb only",
-            sql: `
-        SELECT
-          d.device_id AS device_id,
-          d.device_name AS device_name,
-          NULL AS home_name,
-          NULL AS room_name,
-          NULL AS community_name
-        FROM devices_tb d
-        WHERE d.device_id = ?
-        LIMIT 1
-      `,
-        },
-    ];
-
-    for (const t of tries) {
-        try {
-            const [rows] = await pool.query(t.sql, [deviceId]);
-            if (rows && rows.length) return rows[0];
-        } catch {
-            // swallow and try next
-        }
-    }
-    return null;
-}
-
-// ------------------------
-// Main landing (air.earthen.io/)
-// Shows 10 latest telemetry records BY RECEIVED_AT
+// Main landing page
 // ------------------------
 app.get("/", async (req, res) => {
     try {
-        // --- Device summary (device_id = 1) ---
-        const deviceSummary = await fetchDeviceSummary(pool, 1);
-
-        // --- Latest telemetry by received_at (fallbacks included) ---
-        // We select both received_at and recorded_at so you can compare,
-        // but ORDER BY received_at is the key change.
+        // Latest 10 by received_at (preferred)
         let rows = [];
         try {
             const [r] = await pool.query(
@@ -226,27 +125,21 @@ app.get("/", async (req, res) => {
         SELECT
           tr.device_id,
           tr.received_at,
-          tr.recorded_at,
-          tr.values_json,
-          tr.confidence_json,
-          tr.flags_json
+          tr.values_json
         FROM telemetry_readings_tb tr
         ORDER BY tr.received_at DESC
         LIMIT 10
         `
             );
             rows = r;
-        } catch (e) {
-            // If received_at doesn't exist yet, degrade gracefully (so page still loads).
+        } catch {
+            // fallback if received_at doesn't exist
             const [r] = await pool.query(
                 `
         SELECT
           tr.device_id,
-          NULL AS received_at,
-          tr.recorded_at,
-          tr.values_json,
-          tr.confidence_json,
-          tr.flags_json
+          tr.recorded_at AS received_at,
+          tr.values_json
         FROM telemetry_readings_tb tr
         ORDER BY tr.recorded_at DESC
         LIMIT 10
@@ -256,151 +149,67 @@ app.get("/", async (req, res) => {
         }
 
         const now = new Date();
-
-        const headerTimes = `
-      <div class="timebox">
-        <div><b>Server time (Jakarta):</b> ${esc(fmtDate(now, DISPLAY_TZ))}</div>
-        <div><b>Server time (UTC):</b> ${esc(fmtDate(now, "UTC"))}</div>
-        <div><b>Server ISO:</b> ${esc(now.toISOString())}</div>
+        const serverTimeLine = `
+      <div class="servertime">
+        <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
       </div>
     `;
 
-        const deviceBox = `
-      <div class="devicebox">
-        <h2>Device summary (device_id = 1)</h2>
-        ${
-            deviceSummary
-                ? `
-          <div class="grid">
-            <div class="k"><b>device_id</b></div><div class="v">${esc(deviceSummary.device_id)}</div>
-            <div class="k"><b>name</b></div><div class="v">${esc(deviceSummary.device_name ?? "(null)")}</div>
-            <div class="k"><b>home</b></div><div class="v">${esc(deviceSummary.home_name ?? "(null)")}</div>
-            <div class="k"><b>room</b></div><div class="v">${esc(deviceSummary.room_name ?? "(null)")}</div>
-            <div class="k"><b>community</b></div><div class="v">${esc(deviceSummary.community_name ?? "(null)")}</div>
-          </div>
-        `
-                : `<p class="muted">(not found — check device summary query/table names)</p>`
-        }
-      </div>
-    `;
+        // Prepare chart series in chronological order (oldest -> newest)
+        const chronological = [...rows].reverse();
 
-        const cards = rows
+        const labels = chronological.map((r) =>
+            r?.received_at ? fmtJakarta(r.received_at) : ""
+        );
+
+        const temps = chronological.map((r) => {
+            const obj = safeJsonParse(r.values_json);
+            return nOrNull(obj?.temp_c);
+        });
+
+        const rhs = chronological.map((r) => {
+            const obj = safeJsonParse(r.values_json);
+            return nOrNull(obj?.rh);
+        });
+
+        // Cards (latest first, as fetched)
+        const entriesHtml = rows
             .map((r) => {
                 const valuesObj = safeJsonParse(r.values_json);
-                const deviceTime = coerceDeviceTime(valuesObj);
-
-                const receivedRaw = r.received_at ?? "";
-                const receivedJakarta = r.received_at
-                    ? fmtDate(r.received_at, DISPLAY_TZ)
-                    : "";
-                const receivedUtc = r.received_at ? fmtDate(r.received_at, "UTC") : "";
-
-                const recordedRaw = r.recorded_at ?? "";
-                const recordedJakarta = r.recorded_at
-                    ? fmtDate(r.recorded_at, DISPLAY_TZ)
-                    : "";
-                const recordedUtc = r.recorded_at ? fmtDate(r.recorded_at, "UTC") : "";
-
-                const deviceJakarta = deviceTime?.date
-                    ? fmtDate(deviceTime.date, DISPLAY_TZ)
-                    : null;
-                const deviceUtc = deviceTime?.date ? fmtDate(deviceTime.date, "UTC") : null;
-
-                const values = esc(prettyJson(r.values_json));
-                const conf = esc(prettyJson(r.confidence_json));
-                const flags = esc(prettyJson(r.flags_json));
+                const core = pickCore(valuesObj);
 
                 return `
-          <div class="card">
-            <div class="meta">
-              <div><b>device_id:</b> ${esc(r.device_id)}</div>
+          <div class="entry">
+            <div class="entry-head">
+              <div><b>received:</b> ${esc(r.received_at ? fmtJakarta(r.received_at) : "—")}</div>
+              <div class="muted"><b>device_id:</b> ${esc(r.device_id)}</div>
             </div>
 
-            <div class="compare">
-              <div class="compare-row">
-                <div class="label"><b>received_at (raw):</b></div>
-                <div class="val">${receivedRaw ? esc(receivedRaw) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>received_at (Jakarta):</b></div>
-                <div class="val">${receivedJakarta ? esc(receivedJakarta) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>received_at (UTC):</b></div>
-                <div class="val">${receivedUtc ? esc(receivedUtc) : "—"}</div>
-              </div>
-
-              <hr class="sep"/>
-
-              <div class="compare-row">
-                <div class="label"><b>recorded_at (raw):</b></div>
-                <div class="val">${recordedRaw ? esc(recordedRaw) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>recorded_at (Jakarta):</b></div>
-                <div class="val">${recordedJakarta ? esc(recordedJakarta) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>recorded_at (UTC):</b></div>
-                <div class="val">${recordedUtc ? esc(recordedUtc) : "—"}</div>
-              </div>
-
-              <hr class="sep"/>
-
-              <div class="compare-row">
-                <div class="label"><b>device time (raw field):</b></div>
-                <div class="val">${deviceTime ? esc(deviceTime.raw) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>device time (Jakarta):</b></div>
-                <div class="val">${deviceJakarta ? esc(deviceJakarta) : "—"}</div>
-              </div>
-              <div class="compare-row">
-                <div class="label"><b>device time (UTC):</b></div>
-                <div class="val">${deviceUtc ? esc(deviceUtc) : "—"}</div>
-              </div>
-              ${
-                    deviceTime
-                        ? `
-                <div class="compare-row">
-                  <div class="label"><b>device time parse:</b></div>
-                  <div class="val">${esc(deviceTime.kind)}</div>
-                </div>
-              `
-                        : ""
-                }
-            </div>
-
-            <details open>
-              <summary><b>values_json</b></summary>
-              <pre>${values}</pre>
-            </details>
-
-            ${
-                    conf
-                        ? `
-              <details>
-                <summary><b>confidence_json</b></summary>
-                <pre>${conf}</pre>
-              </details>
-            `
-                        : ""
-                }
-
-            ${
-                    flags
-                        ? `
-              <details>
-                <summary><b>flags_json</b></summary>
-                <pre>${flags}</pre>
-              </details>
-            `
-                        : ""
-                }
+            <table class="core">
+              <tbody>
+                <tr><th>Temp</th><td>${esc(fmtVal(core.temp_c, 1))} °C</td></tr>
+                <tr><th>Humidity</th><td>${esc(fmtVal(core.rh, 1))} %</td></tr>
+                <tr><th>eCO₂</th><td>${esc(fmtVal(core.eco2_ppm, 0))} ppm</td></tr>
+                <tr><th>TVOC</th><td>${esc(fmtVal(core.tvoc_ppb, 0))} ppb</td></tr>
+                <tr><th>AQI</th><td>${esc(fmtVal(core.aqi, 0))}</td></tr>
+                <tr><th>Confidence</th><td>${esc(fmtVal(core.confidence, 0))} %</td></tr>
+                <tr><th>Ready</th><td>${esc(fmtVal(core.ready))}</td></tr>
+                <tr><th>RTC temp</th><td>${esc(fmtVal(core.rtc_temp_c, 1))} °C</td></tr>
+              </tbody>
+            </table>
           </div>
         `;
             })
             .join("\n");
+
+        // Embed chart data safely
+        const chartDataJson = esc(
+            JSON.stringify({
+                labels,
+                temps,
+                rhs,
+            })
+        );
 
         const html = `
       <!doctype html>
@@ -410,46 +219,238 @@ app.get("/", async (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>AirBuddy Online</title>
         <style>
-          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; }
+          :root {
+            --border: #e6e6e6;
+            --muted: #666;
+            --bg: #fff;
+            --panel: #fafafa;
+          }
+          body {
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
+            margin: 24px;
+            color: #111;
+            background: var(--bg);
+          }
           h1 { margin: 0 0 6px; }
-          h2 { margin: 0 0 10px; font-size: 18px; }
-          .sub { color: #555; margin: 0 0 18px; }
+          .sub { color: var(--muted); margin: 0 0 18px; }
           .links a { margin-right: 12px; }
 
-          .timebox { border: 1px solid #e5e5e5; border-radius: 10px; padding: 12px; background: #fafafa; margin: 14px 0 12px; }
-          .devicebox { border: 1px solid #e5e5e5; border-radius: 10px; padding: 14px; background: #fff; margin: 0 0 18px; }
+          .servertime {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: var(--panel);
+            margin: 14px 0 14px;
+          }
 
-          .grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 12px; }
-          .k { color: #333; }
-          .v { color: #111; }
-          .muted { color: #666; margin: 6px 0 0; }
+          .chartwrap {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            margin: 0 0 18px;
+          }
+          .charttitle {
+            display:flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 10px;
+          }
+          .charttitle b { font-size: 16px; }
+          .legend { color: var(--muted); font-size: 13px; }
+          canvas { width: 100%; height: 240px; display: block; }
 
-          .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }
-          .meta { display: flex; gap: 20px; flex-wrap: wrap; color: #333; margin-bottom: 10px; }
+          .entry {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            margin: 12px 0;
+            background: #fff;
+          }
+          .entry-head {
+            display:flex;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+          }
+          .muted { color: var(--muted); }
 
-          .compare { border: 1px dashed #ddd; border-radius: 10px; padding: 12px; margin: 10px 0 12px; background: #fff; }
-          .compare-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0; }
-          .label { min-width: 190px; color: #333; }
-          .val { color: #111; }
+          table.core {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 10px;
+          }
+          table.core th, table.core td {
+            text-align: left;
+            padding: 10px 10px;
+            border-top: 1px solid var(--border);
+            vertical-align: top;
+          }
+          table.core tr:first-child th, table.core tr:first-child td {
+            border-top: none;
+          }
+          table.core th {
+            width: 140px;
+            color: #222;
+            background: #fcfcfc;
+            font-weight: 600;
+          }
 
-          .sep { border: 0; border-top: 1px solid #eee; margin: 10px 0; }
-          pre { background: #f6f6f6; padding: 10px; border-radius: 8px; overflow:auto; }
-          details > summary { cursor: pointer; }
+          .footerline { margin-top: 18px; color: var(--muted); font-size: 13px; }
         </style>
       </head>
       <body>
         <h1>AirBuddy Online</h1>
-        <p class="sub">Latest telemetry (most recent 10 readings) — ordered by <b>received_at</b></p>
-
-        ${headerTimes}
-        ${deviceBox}
+        <p class="sub">Last 10 telemetry readings (ordered by <b>received_at</b>)</p>
 
         <p class="links">
           <a href="/api/live">/api/live</a>
           <a href="/api/health">/api/health</a>
         </p>
 
-        ${rows.length ? cards : `<p>No telemetry readings yet.</p>`}
+        ${serverTimeLine}
+
+        <div class="chartwrap">
+          <div class="charttitle">
+            <b>Temp & Humidity trend (last 10)</b>
+            <div class="legend">Temp = <span style="color:#c62828;font-weight:600;">red</span> • Humidity = <span style="color:#1565c0;font-weight:600;">blue</span></div>
+          </div>
+          <canvas id="trend"></canvas>
+        </div>
+
+        ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
+
+        <div class="footerline">Tip: received_at reflects when the server got the packet (best when device RTC is missing).</div>
+
+        <script>
+          (function () {
+            const data = JSON.parse("${chartDataJson}");
+            const canvas = document.getElementById("trend");
+            const ctx = canvas.getContext("2d");
+
+            function resize() {
+              const dpr = window.devicePixelRatio || 1;
+              const rect = canvas.getBoundingClientRect();
+              canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+              canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+              ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+              draw();
+            }
+
+            function minMax(arr) {
+              let min = Infinity, max = -Infinity;
+              for (const v of arr) {
+                if (v == null) continue;
+                if (v < min) min = v;
+                if (v > max) max = v;
+              }
+              if (min === Infinity) return { min: 0, max: 1 };
+              if (min === max) return { min: min - 1, max: max + 1 };
+              return { min, max };
+            }
+
+            function drawLine(series, yMap, strokeStyle) {
+              ctx.strokeStyle = strokeStyle;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              let started = false;
+              for (let i = 0; i < series.length; i++) {
+                const v = series[i];
+                if (v == null) continue;
+                const x = xMap(i);
+                const y = yMap(v);
+                if (!started) {
+                  ctx.moveTo(x, y);
+                  started = true;
+                } else {
+                  ctx.lineTo(x, y);
+                }
+              }
+              ctx.stroke();
+            }
+
+            function drawPoints(series, yMap, fillStyle) {
+              ctx.fillStyle = fillStyle;
+              for (let i = 0; i < series.length; i++) {
+                const v = series[i];
+                if (v == null) continue;
+                const x = xMap(i);
+                const y = yMap(v);
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            }
+
+            let xMap = (i) => i;
+            function draw() {
+              const W = canvas.getBoundingClientRect().width;
+              const H = canvas.getBoundingClientRect().height;
+
+              // Clear
+              ctx.clearRect(0, 0, W, H);
+
+              const padL = 40, padR = 18, padT = 16, padB = 26;
+              const plotW = Math.max(1, W - padL - padR);
+              const plotH = Math.max(1, H - padT - padB);
+
+              const n = Math.max(data.labels.length, 1);
+              xMap = (i) => padL + (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
+
+              const tMM = minMax(data.temps);
+              const rMM = minMax(data.rhs);
+
+              const yTemp = (v) => padT + (1 - (v - tMM.min) / (tMM.max - tMM.min)) * plotH;
+              const yRh = (v) => padT + (1 - (v - rMM.min) / (rMM.max - rMM.min)) * plotH;
+
+              // Grid
+              ctx.strokeStyle = "#eee";
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              for (let k = 0; k <= 4; k++) {
+                const y = padT + (k * plotH) / 4;
+                ctx.moveTo(padL, y);
+                ctx.lineTo(padL + plotW, y);
+              }
+              ctx.stroke();
+
+              // Axes
+              ctx.strokeStyle = "#ddd";
+              ctx.beginPath();
+              ctx.moveTo(padL, padT);
+              ctx.lineTo(padL, padT + plotH);
+              ctx.lineTo(padL + plotW, padT + plotH);
+              ctx.stroke();
+
+              // Labels (minimal)
+              ctx.fillStyle = "#666";
+              ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif";
+
+              // Left axis labels for Temp (top/bottom)
+              ctx.fillText(tMM.max.toFixed(1) + "°C", 6, padT + 4);
+              ctx.fillText(tMM.min.toFixed(1) + "°C", 6, padT + plotH);
+
+              // Right axis labels for RH (top/bottom)
+              const rhMax = rMM.max.toFixed(1) + "%";
+              const rhMin = rMM.min.toFixed(1) + "%";
+              ctx.fillText(rhMax, padL + plotW + 6, padT + 4);
+              ctx.fillText(rhMin, padL + plotW + 6, padT + plotH);
+
+              // Lines (your requested colors)
+              drawLine(data.temps, yTemp, "#c62828"); // red
+              drawLine(data.rhs, yRh, "#1565c0");    // blue
+
+              // Points
+              drawPoints(data.temps, yTemp, "#c62828");
+              drawPoints(data.rhs, yRh, "#1565c0");
+            }
+
+            window.addEventListener("resize", resize);
+            resize();
+          })();
+        </script>
       </body>
       </html>
     `;
