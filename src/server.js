@@ -3,6 +3,8 @@ import express from "express";
 import dotenv from "dotenv";
 import helmet from "helmet";
 import morgan from "morgan";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
@@ -30,6 +32,12 @@ try {
     process.exit(1);
 }
 
+// ---- Static files (for CSP-safe JS) ----
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// serve /public as /static/*
+app.use("/static", express.static(path.join(__dirname, "..", "public")));
+
 // ------------------------
 // Helpers
 // ------------------------
@@ -41,13 +49,9 @@ const esc = (s) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 
-// FIXED: MySQL JSON may already be an object in Node (mysql2 does this).
 const safeJsonParse = (v) => {
     if (v == null) return null;
-
-    // Already parsed object
     if (typeof v === "object") {
-        // Handle Buffer (rare for JSON, but safe)
         if (Buffer.isBuffer(v)) {
             try {
                 return JSON.parse(v.toString("utf8"));
@@ -57,8 +61,6 @@ const safeJsonParse = (v) => {
         }
         return v;
     }
-
-    // String JSON
     if (typeof v === "string") {
         try {
             return JSON.parse(v);
@@ -66,7 +68,6 @@ const safeJsonParse = (v) => {
             return null;
         }
     }
-
     return null;
 };
 
@@ -75,7 +76,6 @@ const fmtJakarta = (d) => {
     const dt = d instanceof Date ? d : new Date(d);
     if (Number.isNaN(dt.getTime())) return String(d);
 
-    // Example: 20 Feb 2026, 01:07:35 GMT+7
     const parts = new Intl.DateTimeFormat("en-GB", {
         timeZone: DISPLAY_TZ,
         year: "numeric",
@@ -89,15 +89,9 @@ const fmtJakarta = (d) => {
     }).formatToParts(dt);
 
     const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
-    const day = get("day");
-    const month = get("month");
-    const year = get("year");
-    const hour = get("hour");
-    const minute = get("minute");
-    const second = get("second");
-    const tz = get("timeZoneName");
-
-    return `${day} ${month} ${year}, ${hour}:${minute}:${second} ${tz}`;
+    return `${get("day")} ${get("month")} ${get("year")}, ${get("hour")}:${get(
+        "minute"
+    )}:${get("second")} ${get("timeZoneName")}`;
 };
 
 const nOrNull = (x) => {
@@ -128,22 +122,21 @@ const fmtVal = (x, digits = 1) => {
 };
 
 // ------------------------
-// Device summary fetch (schema-aligned to your tables)
+// Device summary (schema-aligned)
 // ------------------------
 async function fetchDeviceSummary(pool, deviceId = 1) {
-    // Your schema: devices_tb has home_id, room_id.
     const sql = `
-    SELECT
-      d.device_id AS device_id,
-      d.device_name AS device_name,
-      h.home_name AS home_name,
-      r.room_name AS room_name
-    FROM devices_tb d
-    LEFT JOIN homes_tb h ON h.home_id = d.home_id
-    LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-    WHERE d.device_id = ?
-    LIMIT 1
-  `;
+        SELECT
+            d.device_id AS device_id,
+            d.device_name AS device_name,
+            h.home_name AS home_name,
+            r.room_name AS room_name
+        FROM devices_tb d
+                 LEFT JOIN homes_tb h ON h.home_id = d.home_id
+                 LEFT JOIN rooms_tb r ON r.room_id = d.room_id
+        WHERE d.device_id = ?
+            LIMIT 1
+    `;
     try {
         const [rows] = await pool.query(sql, [deviceId]);
         return rows && rows.length ? rows[0] : null;
@@ -159,18 +152,17 @@ app.get("/", async (req, res) => {
     try {
         const deviceSummary = await fetchDeviceSummary(pool, 1);
 
-        // Latest 10 by received_at for device_id=1 (since header is device 1)
         const [rows] = await pool.query(
             `
-      SELECT
-        tr.device_id,
-        tr.received_at,
-        tr.values_json
-      FROM telemetry_readings_tb tr
-      WHERE tr.device_id = 1
-      ORDER BY tr.received_at DESC
-      LIMIT 10
-      `
+                SELECT
+                    tr.device_id,
+                    tr.received_at,
+                    tr.values_json
+                FROM telemetry_readings_tb tr
+                WHERE tr.device_id = 1
+                ORDER BY tr.received_at DESC
+                    LIMIT 10
+            `
         );
 
         const now = new Date();
@@ -199,7 +191,7 @@ app.get("/", async (req, res) => {
       </div>
     `;
 
-        // Build series in chronological order (oldest -> newest)
+        // Series (oldest -> newest)
         const chronological = [...rows].reverse();
 
         const labels = [];
@@ -209,10 +201,8 @@ app.get("/", async (req, res) => {
 
         for (const r of chronological) {
             labels.push(r?.received_at ? fmtJakarta(r.received_at) : "");
-
             const obj = safeJsonParse(r.values_json);
             const core = pickCore(obj);
-
             temps.push(core.temp_c);
             rhs.push(core.rh);
             eco2s.push(core.eco2_ppm);
@@ -225,12 +215,13 @@ app.get("/", async (req, res) => {
             eco2: countNonNull(eco2s),
         };
 
-        const chartDataJson = JSON.stringify({
-            labels,
-            temps,
-            rhs,
-            eco2s,
-        });
+        // Put chart data into data-* attributes (CSP-safe: no inline script)
+        const chartDataAttrs = `
+      data-labels='${esc(JSON.stringify(labels))}'
+      data-temps='${esc(JSON.stringify(temps))}'
+      data-rhs='${esc(JSON.stringify(rhs))}'
+      data-eco2s='${esc(JSON.stringify(eco2s))}'
+    `;
 
         const entriesHtml = rows
             .map((r) => {
@@ -322,137 +313,16 @@ app.get("/", async (req, res) => {
           <div class="points">
             Points found: temp=${pointsInfo.temp}/10 • rh=${pointsInfo.rh}/10 • eco2=${pointsInfo.eco2}/10
           </div>
-          <canvas id="trend"></canvas>
-        </div>
 
-        <script id="trend-data" type="application/json">${chartDataJson}</script>
+          <canvas id="trend" ${chartDataAttrs}></canvas>
+        </div>
 
         ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
 
         <div class="footerline">received_at is server time — ideal when device RTC is missing.</div>
 
-        <script>
-          (function () {
-            const raw = document.getElementById("trend-data").textContent;
-            const data = JSON.parse(raw);
-
-            const canvas = document.getElementById("trend");
-            const ctx = canvas.getContext("2d");
-
-            function resize() {
-              const dpr = window.devicePixelRatio || 1;
-              const rect = canvas.getBoundingClientRect();
-              canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-              canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-              ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-              draw();
-            }
-
-            function minMax(arr) {
-              let min = Infinity, max = -Infinity;
-              for (const v of arr) {
-                if (v == null) continue;
-                if (v < min) min = v;
-                if (v > max) max = v;
-              }
-              if (min === Infinity) return { min: 0, max: 1 };
-              if (min === max) return { min: min - 1, max: max + 1 };
-              return { min, max };
-            }
-
-            function drawLine(series, yMap, strokeStyle) {
-              ctx.strokeStyle = strokeStyle;
-              ctx.lineWidth = 2;
-              ctx.beginPath();
-              let started = false;
-              for (let i = 0; i < series.length; i++) {
-                const v = series[i];
-                if (v == null) continue;
-                const x = xMap(i);
-                const y = yMap(v);
-                if (!started) { ctx.moveTo(x, y); started = true; }
-                else ctx.lineTo(x, y);
-              }
-              ctx.stroke();
-            }
-
-            function drawPoints(series, yMap, fillStyle) {
-              ctx.fillStyle = fillStyle;
-              for (let i = 0; i < series.length; i++) {
-                const v = series[i];
-                if (v == null) continue;
-                const x = xMap(i);
-                const y = yMap(v);
-                ctx.beginPath();
-                ctx.arc(x, y, 3, 0, Math.PI * 2);
-                ctx.fill();
-              }
-            }
-
-            let xMap = (i) => i;
-
-            function draw() {
-              const W = canvas.getBoundingClientRect().width;
-              const H = canvas.getBoundingClientRect().height;
-              ctx.clearRect(0, 0, W, H);
-
-              const padL = 44, padR = 44, padT = 16, padB = 26;
-              const plotW = Math.max(1, W - padL - padR);
-              const plotH = Math.max(1, H - padT - padB);
-
-              const n = Math.max((data.labels || []).length, 1);
-              xMap = (i) => padL + (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
-
-              const tMM = minMax(data.temps || []);
-              const rMM = minMax(data.rhs || []);
-              const cMM = minMax(data.eco2s || []);
-
-              const yTemp = (v) => padT + (1 - (v - tMM.min) / (tMM.max - tMM.min)) * plotH;
-              const yRh   = (v) => padT + (1 - (v - rMM.min) / (rMM.max - rMM.min)) * plotH;
-              const yCo2  = (v) => padT + (1 - (v - cMM.min) / (cMM.max - cMM.min)) * plotH;
-
-              // Grid
-              ctx.strokeStyle = "#eee";
-              ctx.lineWidth = 1;
-              ctx.beginPath();
-              for (let k = 0; k <= 4; k++) {
-                const y = padT + (k * plotH) / 4;
-                ctx.moveTo(padL, y);
-                ctx.lineTo(padL + plotW, y);
-              }
-              ctx.stroke();
-
-              // Axes
-              ctx.strokeStyle = "#ddd";
-              ctx.beginPath();
-              ctx.moveTo(padL, padT);
-              ctx.lineTo(padL, padT + plotH);
-              ctx.lineTo(padL + plotW, padT + plotH);
-              ctx.stroke();
-
-              // Minimal labels
-              ctx.fillStyle = "#666";
-              ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif";
-              ctx.fillText(tMM.max.toFixed(1) + "°C", 6, padT + 4);
-              ctx.fillText(tMM.min.toFixed(1) + "°C", 6, padT + plotH);
-              ctx.fillText(rMM.max.toFixed(1) + "%", padL + plotW + 6, padT + 4);
-              ctx.fillText(rMM.min.toFixed(1) + "%", padL + plotW + 6, padT + plotH);
-
-              // Lines
-              drawLine(data.temps || [], yTemp, "#c62828");
-              drawLine(data.rhs   || [], yRh,   "#1565c0");
-              drawLine(data.eco2s || [], yCo2,  "#6a1b9a");
-
-              // Points
-              drawPoints(data.temps || [], yTemp, "#c62828");
-              drawPoints(data.rhs   || [], yRh,   "#1565c0");
-              drawPoints(data.eco2s || [], yCo2,  "#6a1b9a");
-            }
-
-            window.addEventListener("resize", resize);
-            resize();
-          })();
-        </script>
+        <!-- CSP-safe script include (script-src 'self' allows this) -->
+        <script src="/static/chart.js"></script>
       </body>
       </html>
     `;
@@ -465,7 +335,7 @@ app.get("/", async (req, res) => {
 });
 
 // ------------------------
-// System routes (/api/live, /api/health)
+// System routes
 // ------------------------
 app.use("/api", systemRouter(pool, startedAt));
 
@@ -476,7 +346,7 @@ app.use("/api", deviceAuth(pool), telemetryRouter(pool));
 app.use("/api", deviceAuth(pool), deviceRouter(pool));
 
 // ------------------------
-// Start Server (behind nginx)
+// Start Server
 // ------------------------
 app.listen(Number(PORT), "127.0.0.1", () => {
     console.log(`AirBuddy Online API listening on http://127.0.0.1:${PORT}`);
