@@ -32,10 +32,10 @@ try {
     process.exit(1);
 }
 
-// ---- Static files (for CSP-safe JS) ----
+// ---- Static files (for CSP-safe external JS) ----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// serve /public as /static/*
+// Serve /public as /static/*
 app.use("/static", express.static(path.join(__dirname, "..", "public")));
 
 // ------------------------
@@ -49,8 +49,10 @@ const esc = (s) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 
+// FIXED: MySQL JSON may already be an object (mysql2 behavior).
 const safeJsonParse = (v) => {
     if (v == null) return null;
+
     if (typeof v === "object") {
         if (Buffer.isBuffer(v)) {
             try {
@@ -61,6 +63,7 @@ const safeJsonParse = (v) => {
         }
         return v;
     }
+
     if (typeof v === "string") {
         try {
             return JSON.parse(v);
@@ -68,6 +71,7 @@ const safeJsonParse = (v) => {
             return null;
         }
     }
+
     return null;
 };
 
@@ -122,7 +126,7 @@ const fmtVal = (x, digits = 1) => {
 };
 
 // ------------------------
-// Device summary (schema-aligned)
+// Device summary (schema-aligned to your tables)
 // ------------------------
 async function fetchDeviceSummary(pool, deviceId = 1) {
     const sql = `
@@ -150,29 +154,33 @@ async function fetchDeviceSummary(pool, deviceId = 1) {
 // ------------------------
 app.get("/", async (req, res) => {
     try {
+        // Header device info for device_id=1
         const deviceSummary = await fetchDeviceSummary(pool, 1);
 
+        // Latest 10 telemetry rows for device_id=1 by received_at
         const [rows] = await pool.query(
             `
-                SELECT
-                    tr.device_id,
-                    tr.received_at,
-                    tr.values_json
-                FROM telemetry_readings_tb tr
-                WHERE tr.device_id = 1
-                ORDER BY tr.received_at DESC
-                    LIMIT 10
-            `
+      SELECT
+        tr.device_id,
+        tr.received_at,
+        tr.values_json
+      FROM telemetry_readings_tb tr
+      WHERE tr.device_id = 1
+      ORDER BY tr.received_at DESC
+      LIMIT 10
+      `
         );
 
         const now = new Date();
 
+        // One time line only
         const serverTimeLine = `
       <div class="servertime">
         <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
       </div>
     `;
 
+        // Device info line under server time
         const deviceLine = `
       <div class="deviceinfo">
         ${
@@ -191,7 +199,7 @@ app.get("/", async (req, res) => {
       </div>
     `;
 
-        // Series (oldest -> newest)
+        // Build series in chronological order (oldest -> newest)
         const chronological = [...rows].reverse();
 
         const labels = [];
@@ -208,14 +216,17 @@ app.get("/", async (req, res) => {
             eco2s.push(core.eco2_ppm);
         }
 
-        const countNonNull = (arr) => arr.reduce((a, v) => a + (v == null ? 0 : 1), 0);
+        const countNonNull = (arr) =>
+            arr.reduce((a, v) => a + (v == null ? 0 : 1), 0);
+
         const pointsInfo = {
             temp: countNonNull(temps),
             rh: countNonNull(rhs),
             eco2: countNonNull(eco2s),
         };
 
-        // Put chart data into data-* attributes (CSP-safe: no inline script)
+        // Chart data as data-* attributes on each canvas (CSP-safe)
+        // NOTE: esc() is for HTML safety; chart.js will JSON.parse the attribute strings.
         const chartDataAttrs = `
       data-labels='${esc(JSON.stringify(labels))}'
       data-temps='${esc(JSON.stringify(temps))}'
@@ -223,6 +234,7 @@ app.get("/", async (req, res) => {
       data-eco2s='${esc(JSON.stringify(eco2s))}'
     `;
 
+        // Entries (latest first)
         const entriesHtml = rows
             .map((r) => {
                 const obj = safeJsonParse(r.values_json);
@@ -231,7 +243,9 @@ app.get("/", async (req, res) => {
                 return `
           <div class="entry">
             <div class="entry-head">
-              <div><b>received:</b> ${esc(r.received_at ? fmtJakarta(r.received_at) : "—")}</div>
+              <div><b>received:</b> ${esc(
+                    r.received_at ? fmtJakarta(r.received_at) : "—"
+                )}</div>
               <div class="muted"><b>device_id:</b> ${esc(r.device_id)}</div>
             </div>
 
@@ -252,6 +266,36 @@ app.get("/", async (req, res) => {
             })
             .join("\n");
 
+        // Three stacked charts (temp, humidity, eco2)
+        const chartsHtml = `
+      <div class="chartwrap">
+        <div class="charttitle">
+          <b>Temperature trend (last 10)</b>
+          <div class="legend">Temp = <span style="color:#c62828;font-weight:600;">red</span></div>
+        </div>
+        <div class="points">Points found: ${pointsInfo.temp}/10</div>
+        <canvas id="trend-temp" ${chartDataAttrs}></canvas>
+      </div>
+
+      <div class="chartwrap">
+        <div class="charttitle">
+          <b>Humidity trend (last 10)</b>
+          <div class="legend">Humidity = <span style="color:#1565c0;font-weight:600;">blue</span></div>
+        </div>
+        <div class="points">Points found: ${pointsInfo.rh}/10</div>
+        <canvas id="trend-rh" ${chartDataAttrs}></canvas>
+      </div>
+
+      <div class="chartwrap">
+        <div class="charttitle">
+          <b>eCO₂ trend (last 10)</b>
+          <div class="legend">eCO₂ = <span style="color:#6a1b9a;font-weight:600;">purple</span></div>
+        </div>
+        <div class="points">Points found: ${pointsInfo.eco2}/10</div>
+        <canvas id="trend-eco2" ${chartDataAttrs}></canvas>
+      </div>
+    `;
+
         const html = `
       <!doctype html>
       <html lang="en">
@@ -271,12 +315,12 @@ app.get("/", async (req, res) => {
           .deviceinfo .dot { margin: 0 8px; color: #bbb; }
           .muted { color: var(--muted); }
 
-          .chartwrap { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 0 0 18px; }
-          .charttitle { display:flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+          .chartwrap { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 0 0 14px; background: #fff; }
+          .charttitle { display:flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; }
           .charttitle b { font-size: 16px; }
           .legend { color: var(--muted); font-size: 13px; }
-          .points { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
-          canvas { width: 100%; height: 260px; display: block; }
+          .points { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+          canvas { width: 100%; height: 220px; display: block; }
 
           .entry { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 12px 0; background: #fff; }
           .entry-head { display:flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -301,27 +345,13 @@ app.get("/", async (req, res) => {
         ${serverTimeLine}
         ${deviceLine}
 
-        <div class="chartwrap">
-          <div class="charttitle">
-            <b>Temp, Humidity & eCO₂ trend (last 10)</b>
-            <div class="legend">
-              Temp = <span style="color:#c62828;font-weight:600;">red</span> •
-              Humidity = <span style="color:#1565c0;font-weight:600;">blue</span> •
-              eCO₂ = <span style="color:#6a1b9a;font-weight:600;">purple</span>
-            </div>
-          </div>
-          <div class="points">
-            Points found: temp=${pointsInfo.temp}/10 • rh=${pointsInfo.rh}/10 • eco2=${pointsInfo.eco2}/10
-          </div>
-
-          <canvas id="trend" ${chartDataAttrs}></canvas>
-        </div>
+        ${chartsHtml}
 
         ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
 
         <div class="footerline">received_at is server time — ideal when device RTC is missing.</div>
 
-        <!-- CSP-safe script include (script-src 'self' allows this) -->
+        <!-- CSP-safe external script include -->
         <script src="/static/chart.js"></script>
       </body>
       </html>
