@@ -20,6 +20,7 @@ app.use(express.json({ limit: "256kb" }));
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
 
+// Always format display in Jakarta, regardless of OS timezone
 const DISPLAY_TZ = "Asia/Jakarta";
 
 let pool;
@@ -105,19 +106,80 @@ const pickCore = (valuesObj) => {
 const fmtVal = (x, digits = 1) => {
     if (x == null) return "—";
     if (typeof x === "boolean") return x ? "true" : "false";
-    if (typeof x === "number") {
-        // Humidity could be 76.33171 (keep 1 decimal looks nice)
-        return Number.isFinite(x) ? x.toFixed(digits) : "—";
-    }
+    if (typeof x === "number") return Number.isFinite(x) ? x.toFixed(digits) : "—";
     return String(x);
 };
+
+// ------------------------
+// Device summary fetch (best-effort)
+// show: device_id, name, home, room
+// ------------------------
+async function fetchDeviceSummary(pool, deviceId = 1) {
+    const tries = [
+        {
+            sql: `
+        SELECT
+          d.device_id AS device_id,
+          d.device_name AS device_name,
+          h.home_name AS home_name,
+          r.room_name AS room_name
+        FROM devices_tb d
+        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
+        LEFT JOIN homes_tb h ON h.home_id = d.home_id
+        WHERE d.device_id = ?
+        LIMIT 1
+      `,
+        },
+        {
+            // If device doesn't store home_id directly; room links to home
+            sql: `
+        SELECT
+          d.device_id AS device_id,
+          d.device_name AS device_name,
+          h.home_name AS home_name,
+          r.room_name AS room_name
+        FROM devices_tb d
+        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
+        LEFT JOIN homes_tb h ON h.home_id = r.home_id
+        WHERE d.device_id = ?
+        LIMIT 1
+      `,
+        },
+        {
+            // Minimal
+            sql: `
+        SELECT
+          d.device_id AS device_id,
+          d.device_name AS device_name,
+          NULL AS home_name,
+          NULL AS room_name
+        FROM devices_tb d
+        WHERE d.device_id = ?
+        LIMIT 1
+      `,
+        },
+    ];
+
+    for (const t of tries) {
+        try {
+            const [rows] = await pool.query(t.sql, [deviceId]);
+            if (rows && rows.length) return rows[0];
+        } catch {
+            // try next
+        }
+    }
+    return null;
+}
 
 // ------------------------
 // Main landing page
 // ------------------------
 app.get("/", async (req, res) => {
     try {
-        // Latest 10 by received_at (preferred)
+        // Device info for device_id = 1 (for header)
+        const deviceSummary = await fetchDeviceSummary(pool, 1);
+
+        // Latest 10 by received_at (preferred). Fallback to recorded_at if needed.
         let rows = [];
         try {
             const [r] = await pool.query(
@@ -133,7 +195,6 @@ app.get("/", async (req, res) => {
             );
             rows = r;
         } catch {
-            // fallback if received_at doesn't exist
             const [r] = await pool.query(
                 `
         SELECT
@@ -149,13 +210,34 @@ app.get("/", async (req, res) => {
         }
 
         const now = new Date();
+
+        // One time line only (requested format)
         const serverTimeLine = `
       <div class="servertime">
         <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
       </div>
     `;
 
-        // Prepare chart series in chronological order (oldest -> newest)
+        // Device info directly under server time
+        const deviceLine = `
+      <div class="deviceinfo">
+        ${
+            deviceSummary
+                ? `
+          <b>Device:</b> ${esc(deviceSummary.device_name ?? "(unnamed)")}
+          <span class="dot">•</span>
+          <b>Home:</b> ${esc(deviceSummary.home_name ?? "(none)")}
+          <span class="dot">•</span>
+          <b>Room:</b> ${esc(deviceSummary.room_name ?? "(none)")}
+          <span class="dot">•</span>
+          <b>ID:</b> ${esc(deviceSummary.device_id)}
+        `
+                : `<span class="muted">(device_id=1 not found — update device summary query/table names)</span>`
+        }
+      </div>
+    `;
+
+        // Chart series in chronological order (oldest -> newest)
         const chronological = [...rows].reverse();
 
         const labels = chronological.map((r) =>
@@ -172,7 +254,20 @@ app.get("/", async (req, res) => {
             return nOrNull(obj?.rh);
         });
 
-        // Cards (latest first, as fetched)
+        const eco2s = chronological.map((r) => {
+            const obj = safeJsonParse(r.values_json);
+            return nOrNull(obj?.eco2_ppm);
+        });
+
+        // IMPORTANT FIX: embed JSON as application/json script block (no HTML escaping)
+        const chartDataJson = JSON.stringify({
+            labels,
+            temps,
+            rhs,
+            eco2s,
+        });
+
+        // Entries (latest first)
         const entriesHtml = rows
             .map((r) => {
                 const valuesObj = safeJsonParse(r.values_json);
@@ -201,15 +296,6 @@ app.get("/", async (req, res) => {
         `;
             })
             .join("\n");
-
-        // Embed chart data safely
-        const chartDataJson = esc(
-            JSON.stringify({
-                labels,
-                temps,
-                rhs,
-            })
-        );
 
         const html = `
       <!doctype html>
@@ -240,8 +326,18 @@ app.get("/", async (req, res) => {
             border-radius: 12px;
             padding: 12px 14px;
             background: var(--panel);
-            margin: 14px 0 14px;
+            margin: 14px 0 10px;
           }
+          .deviceinfo {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: #fff;
+            margin: 0 0 18px;
+            color: #222;
+          }
+          .deviceinfo .dot { margin: 0 8px; color: #bbb; }
+          .muted { color: var(--muted); }
 
           .chartwrap {
             border: 1px solid var(--border);
@@ -258,7 +354,7 @@ app.get("/", async (req, res) => {
           }
           .charttitle b { font-size: 16px; }
           .legend { color: var(--muted); font-size: 13px; }
-          canvas { width: 100%; height: 240px; display: block; }
+          canvas { width: 100%; height: 260px; display: block; }
 
           .entry {
             border: 1px solid var(--border);
@@ -274,7 +370,6 @@ app.get("/", async (req, res) => {
             flex-wrap: wrap;
             margin-bottom: 10px;
           }
-          .muted { color: var(--muted); }
 
           table.core {
             width: 100%;
@@ -311,22 +406,33 @@ app.get("/", async (req, res) => {
         </p>
 
         ${serverTimeLine}
+        ${deviceLine}
 
         <div class="chartwrap">
           <div class="charttitle">
-            <b>Temp & Humidity trend (last 10)</b>
-            <div class="legend">Temp = <span style="color:#c62828;font-weight:600;">red</span> • Humidity = <span style="color:#1565c0;font-weight:600;">blue</span></div>
+            <b>Temp, Humidity & eCO₂ trend (last 10)</b>
+            <div class="legend">
+              Temp = <span style="color:#c62828;font-weight:600;">red</span> •
+              Humidity = <span style="color:#1565c0;font-weight:600;">blue</span> •
+              eCO₂ = <span style="color:#6a1b9a;font-weight:600;">purple</span>
+            </div>
           </div>
           <canvas id="trend"></canvas>
         </div>
 
+        <script id="trend-data" type="application/json">${chartDataJson}</script>
+
         ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
 
-        <div class="footerline">Tip: received_at reflects when the server got the packet (best when device RTC is missing).</div>
+        <div class="footerline">
+          Tip: received_at reflects when the server got the packet (best when device RTC is missing).
+        </div>
 
         <script>
           (function () {
-            const data = JSON.parse("${chartDataJson}");
+            const raw = document.getElementById("trend-data").textContent;
+            const data = JSON.parse(raw);
+
             const canvas = document.getElementById("trend");
             const ctx = canvas.getContext("2d");
 
@@ -361,12 +467,8 @@ app.get("/", async (req, res) => {
                 if (v == null) continue;
                 const x = xMap(i);
                 const y = yMap(v);
-                if (!started) {
-                  ctx.moveTo(x, y);
-                  started = true;
-                } else {
-                  ctx.lineTo(x, y);
-                }
+                if (!started) { ctx.moveTo(x, y); started = true; }
+                else ctx.lineTo(x, y);
               }
               ctx.stroke();
             }
@@ -385,25 +487,26 @@ app.get("/", async (req, res) => {
             }
 
             let xMap = (i) => i;
+
             function draw() {
               const W = canvas.getBoundingClientRect().width;
               const H = canvas.getBoundingClientRect().height;
-
-              // Clear
               ctx.clearRect(0, 0, W, H);
 
-              const padL = 40, padR = 18, padT = 16, padB = 26;
+              const padL = 44, padR = 44, padT = 16, padB = 26;
               const plotW = Math.max(1, W - padL - padR);
               const plotH = Math.max(1, H - padT - padB);
 
-              const n = Math.max(data.labels.length, 1);
+              const n = Math.max((data.labels || []).length, 1);
               xMap = (i) => padL + (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
 
-              const tMM = minMax(data.temps);
-              const rMM = minMax(data.rhs);
+              const tMM = minMax(data.temps || []);
+              const rMM = minMax(data.rhs || []);
+              const cMM = minMax(data.eco2s || []);
 
               const yTemp = (v) => padT + (1 - (v - tMM.min) / (tMM.max - tMM.min)) * plotH;
-              const yRh = (v) => padT + (1 - (v - rMM.min) / (rMM.max - rMM.min)) * plotH;
+              const yRh   = (v) => padT + (1 - (v - rMM.min) / (rMM.max - rMM.min)) * plotH;
+              const yCo2  = (v) => padT + (1 - (v - cMM.min) / (cMM.max - cMM.min)) * plotH;
 
               // Grid
               ctx.strokeStyle = "#eee";
@@ -428,23 +531,25 @@ app.get("/", async (req, res) => {
               ctx.fillStyle = "#666";
               ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif";
 
-              // Left axis labels for Temp (top/bottom)
+              // Left labels for Temp
               ctx.fillText(tMM.max.toFixed(1) + "°C", 6, padT + 4);
               ctx.fillText(tMM.min.toFixed(1) + "°C", 6, padT + plotH);
 
-              // Right axis labels for RH (top/bottom)
-              const rhMax = rMM.max.toFixed(1) + "%";
-              const rhMin = rMM.min.toFixed(1) + "%";
-              ctx.fillText(rhMax, padL + plotW + 6, padT + 4);
-              ctx.fillText(rhMin, padL + plotW + 6, padT + plotH);
+              // Right labels for RH
+              ctx.fillText(rMM.max.toFixed(1) + "%", padL + plotW + 6, padT + 4);
+              ctx.fillText(rMM.min.toFixed(1) + "%", padL + plotW + 6, padT + plotH);
 
-              // Lines (your requested colors)
-              drawLine(data.temps, yTemp, "#c62828"); // red
-              drawLine(data.rhs, yRh, "#1565c0");    // blue
+              // eCO2 labels (bottom-left of plot area, subtle)
+              ctx.fillText("CO₂ " + cMM.min.toFixed(0) + "–" + cMM.max.toFixed(0) + " ppm", padL + 6, padT + plotH + 18);
 
-              // Points
-              drawPoints(data.temps, yTemp, "#c62828");
-              drawPoints(data.rhs, yRh, "#1565c0");
+              // Lines + points (requested colors)
+              drawLine(data.temps || [], yTemp, "#c62828"); // red
+              drawLine(data.rhs   || [], yRh,   "#1565c0"); // blue
+              drawLine(data.eco2s || [], yCo2,  "#6a1b9a"); // purple
+
+              drawPoints(data.temps || [], yTemp, "#c62828");
+              drawPoints(data.rhs   || [], yRh,   "#1565c0");
+              drawPoints(data.eco2s || [], yCo2,  "#6a1b9a");
             }
 
             window.addEventListener("resize", resize);
