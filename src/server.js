@@ -18,6 +18,14 @@ dotenv.config();
 
 const app = express();
 
+process.on("unhandledRejection", (e) => {
+    console.error("UNHANDLED REJECTION:", e && (e.stack || e));
+});
+
+process.on("uncaughtException", (e) => {
+    console.error("UNCAUGHT EXCEPTION:", e && (e.stack || e));
+});
+
 // ---- Helmet with CSP that allows Google Fonts (Arvo + Mulish) ----
 // If you set CSP at nginx instead of Node, mirror these there too.
 app.use(
