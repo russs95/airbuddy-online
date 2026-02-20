@@ -66,8 +66,8 @@ export function telemetryRouter(pool) {
             try {
                 await conn.query(
                     `INSERT INTO telemetry_readings_tb
-           (device_id, recorded_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
-           VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
+                     (device_id, recorded_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
+                     VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
                     [deviceId, recordedAt, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
                 );
             } catch (e) {
@@ -81,7 +81,14 @@ export function telemetryRouter(pool) {
             );
 
             await conn.commit();
-            return res.status(200).json({ ok: true });
+
+            // NEW: include server unix time (seconds) to help device detect drift
+            const serverNowUnix = Math.floor(Date.now() / 1000);
+
+            return res.status(200).json({
+                ok: true,
+                server_now: serverNowUnix,
+            });
         } catch (e) {
             try { await conn.rollback(); } catch {}
             console.error("telemetry error:", e?.code || e?.message || e);
