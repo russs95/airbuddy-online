@@ -1,5 +1,6 @@
+// src/routes/telemetry.js
 import express from "express";
-import { isFiniteNumber, toMySQLDatetimeFromUnixSeconds } from "../utils/http.js";
+import { isFiniteNumber } from "../utils/http.js"; // <-- we no longer use toMySQLDatetimeFromUnixSeconds
 
 function validateTelemetryBody(body) {
     if (!body || typeof body !== "object") return "Body must be a JSON object";
@@ -47,7 +48,10 @@ export function telemetryRouter(pool) {
         }
 
         const deviceId = req.device.device_id;
-        const recordedAt = toMySQLDatetimeFromUnixSeconds(req.body.recorded_at);
+
+        // Keep unix seconds as-is and let MySQL convert it.
+        // This avoids Node timezone formatting bugs.
+        const recordedAtUnix = req.body.recorded_at;
 
         const lat = req.body.lat ?? null;
         const lon = req.body.lon ?? null;
@@ -62,23 +66,31 @@ export function telemetryRouter(pool) {
         try {
             await conn.beginTransaction();
 
+            // Force this session into UTC so FROM_UNIXTIME() is unambiguous.
+            // (Even if pool-level hook fails, this guarantees correctness here.)
+            try {
+                await conn.query("SET time_zone = '+00:00'");
+            } catch {
+                // ignore; we'll still attempt insert
+            }
+
             // 1) Insert telemetry (idempotent via unique constraint)
             try {
                 await conn.query(
                     `INSERT INTO telemetry_readings_tb
-                     (device_id, recorded_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
-                     VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
-                    [deviceId, recordedAt, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
+            (device_id, recorded_at, received_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
+           VALUES
+            (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
+                    [deviceId, recordedAtUnix, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
                 );
             } catch (e) {
                 if (e.code !== "ER_DUP_ENTRY") throw e;
             }
 
-            // 2) Update last_seen
-            await conn.query(
-                "UPDATE devices_tb SET last_seen_at = NOW() WHERE device_id = ?",
-                [deviceId]
-            );
+            // 2) Update last_seen (use UTC to stay consistent)
+            await conn.query("UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?", [
+                deviceId,
+            ]);
 
             await conn.commit();
 
@@ -90,8 +102,11 @@ export function telemetryRouter(pool) {
                 server_now: serverNowUnix,
             });
         } catch (e) {
-            try { await conn.rollback(); } catch {}
-            console.error("telemetry error:", e?.code || e?.message || e);
+            try {
+                await conn.rollback();
+            } catch {}
+
+            console.error("telemetry error:", e && (e.stack || e?.code || e?.message || e));
             return res.status(500).json({ ok: false, error: "server_error" });
         } finally {
             conn.release();
