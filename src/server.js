@@ -15,7 +15,28 @@ import { systemRouter } from "./routes/system.js";
 dotenv.config();
 
 const app = express();
-app.use(helmet());
+
+// ---- Helmet with CSP that allows Google Fonts (Arvo + Mulish) ----
+// If you set CSP at nginx instead of Node, mirror these there too.
+app.use(
+    helmet({
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                scriptSrc: ["'self'"], // inline scripts blocked (good)
+                styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+                fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+                imgSrc: ["'self'", "data:"],
+                connectSrc: ["'self'"],
+                objectSrc: ["'none'"],
+                baseUri: ["'self'"],
+                frameAncestors: ["'none'"],
+                upgradeInsecureRequests: [],
+            },
+        },
+    })
+);
+
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "256kb" }));
 
@@ -32,7 +53,7 @@ try {
     process.exit(1);
 }
 
-// ---- Static files (for CSP-safe external JS) ----
+// ---- Static files (CSP-safe external JS) ----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // Serve /public as /static/*
@@ -49,7 +70,7 @@ const esc = (s) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 
-// FIXED: MySQL JSON may already be an object (mysql2 behavior).
+// MySQL JSON may already be an object (mysql2 behavior).
 const safeJsonParse = (v) => {
     if (v == null) return null;
 
@@ -98,6 +119,21 @@ const fmtJakarta = (d) => {
     )}:${get("second")} ${get("timeZoneName")}`;
 };
 
+// Short label for chart bottom ticks (you’ll use this in chart.js)
+const fmtJakartaShort = (d) => {
+    if (!d) return "";
+    const dt = d instanceof Date ? d : new Date(d);
+    if (Number.isNaN(dt.getTime())) return String(d);
+
+    // e.g. "07:50"
+    return new Intl.DateTimeFormat("en-GB", {
+        timeZone: DISPLAY_TZ,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+    }).format(dt);
+};
+
 const nOrNull = (x) => {
     if (x == null) return null;
     const n = Number(x);
@@ -125,8 +161,16 @@ const fmtVal = (x, digits = 1) => {
     return String(x);
 };
 
+const clampLimit = (raw) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return 10;
+    if (n <= 10) return 10;
+    if (n <= 50) return 50;
+    return 100;
+};
+
 // ------------------------
-// Device summary (schema-aligned to your tables)
+// Device summary (schema-aligned)
 // ------------------------
 async function fetchDeviceSummary(pool, deviceId = 1) {
     const sql = `
@@ -154,10 +198,11 @@ async function fetchDeviceSummary(pool, deviceId = 1) {
 // ------------------------
 app.get("/", async (req, res) => {
     try {
-        // Header device info for device_id=1
-        const deviceSummary = await fetchDeviceSummary(pool, 1);
+        const limit = clampLimit(req.query.limit);
+        const deviceId = 1;
 
-        // Latest 10 telemetry rows for device_id=1 by received_at
+        const deviceSummary = await fetchDeviceSummary(pool, deviceId);
+
         const [rows] = await pool.query(
             `
       SELECT
@@ -165,22 +210,21 @@ app.get("/", async (req, res) => {
         tr.received_at,
         tr.values_json
       FROM telemetry_readings_tb tr
-      WHERE tr.device_id = 1
+      WHERE tr.device_id = ?
       ORDER BY tr.received_at DESC
-      LIMIT 10
-      `
+      LIMIT ?
+      `,
+            [deviceId, limit]
         );
 
         const now = new Date();
 
-        // One time line only
         const serverTimeLine = `
       <div class="servertime">
         <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
       </div>
     `;
 
-        // Device info line under server time
         const deviceLine = `
       <div class="deviceinfo">
         ${
@@ -202,15 +246,19 @@ app.get("/", async (req, res) => {
         // Build series in chronological order (oldest -> newest)
         const chronological = [...rows].reverse();
 
-        const labels = [];
+        const labelsLong = [];
+        const labelsShort = [];
         const temps = [];
         const rhs = [];
         const eco2s = [];
 
         for (const r of chronological) {
-            labels.push(r?.received_at ? fmtJakarta(r.received_at) : "");
+            labelsLong.push(r?.received_at ? fmtJakarta(r.received_at) : "");
+            labelsShort.push(r?.received_at ? fmtJakartaShort(r.received_at) : "");
+
             const obj = safeJsonParse(r.values_json);
             const core = pickCore(obj);
+
             temps.push(core.temp_c);
             rhs.push(core.rh);
             eco2s.push(core.eco2_ppm);
@@ -226,12 +274,27 @@ app.get("/", async (req, res) => {
         };
 
         // Chart data as data-* attributes on each canvas (CSP-safe)
-        // NOTE: esc() is for HTML safety; chart.js will JSON.parse the attribute strings.
+        // NOTE: chart.js parses these attributes.
         const chartDataAttrs = `
-      data-labels='${esc(JSON.stringify(labels))}'
+      data-limit='${esc(limit)}'
+      data-labels-long='${esc(JSON.stringify(labelsLong))}'
+      data-labels-short='${esc(JSON.stringify(labelsShort))}'
       data-temps='${esc(JSON.stringify(temps))}'
       data-rhs='${esc(JSON.stringify(rhs))}'
       data-eco2s='${esc(JSON.stringify(eco2s))}'
+    `;
+
+        // Dropdown (no JS required; just submit GET)
+        const limitControl = `
+      <form class="limitform" method="GET" action="/">
+        <label for="limit"><b>Chart range:</b></label>
+        <select id="limit" name="limit">
+          <option value="10" ${limit === 10 ? "selected" : ""}>10 entries</option>
+          <option value="50" ${limit === 50 ? "selected" : ""}>50 entries</option>
+          <option value="100" ${limit === 100 ? "selected" : ""}>100 entries</option>
+        </select>
+        <button type="submit">Apply</button>
+      </form>
     `;
 
         // Entries (latest first)
@@ -267,31 +330,42 @@ app.get("/", async (req, res) => {
             .join("\n");
 
         // Three stacked charts (temp, humidity, eco2)
+        // chart.js should:
+        // - draw 5 vertical grid lines (0/25/50/75/100%)
+        // - show 3 bottom time labels (start/mid/end) using labelsShort
+        // - show 5 y labels (min + 3 intermediate + max)
         const chartsHtml = `
+      <div class="charts-head">
+        ${limitControl}
+        <div class="hint">
+          <span class="muted">X-axis shows 5 ticks; times shown at start / middle / end.</span>
+        </div>
+      </div>
+
       <div class="chartwrap">
         <div class="charttitle">
-          <b>Temperature trend (last 10)</b>
-          <div class="legend">Temp = <span style="color:#c62828;font-weight:600;">red</span></div>
+          <b>Temperature trend (last ${esc(limit)})</b>
+          <div class="legend">Temp = <span style="color:#c62828;font-weight:700;">red</span></div>
         </div>
-        <div class="points">Points found: ${pointsInfo.temp}/10</div>
+        <div class="points">Points: ${pointsInfo.temp}/${limit}</div>
         <canvas id="trend-temp" ${chartDataAttrs}></canvas>
       </div>
 
       <div class="chartwrap">
         <div class="charttitle">
-          <b>Humidity trend (last 10)</b>
-          <div class="legend">Humidity = <span style="color:#1565c0;font-weight:600;">blue</span></div>
+          <b>Humidity trend (last ${esc(limit)})</b>
+          <div class="legend">Humidity = <span style="color:#1565c0;font-weight:700;">blue</span></div>
         </div>
-        <div class="points">Points found: ${pointsInfo.rh}/10</div>
+        <div class="points">Points: ${pointsInfo.rh}/${limit}</div>
         <canvas id="trend-rh" ${chartDataAttrs}></canvas>
       </div>
 
       <div class="chartwrap">
         <div class="charttitle">
-          <b>eCO₂ trend (last 10)</b>
-          <div class="legend">eCO₂ = <span style="color:#6a1b9a;font-weight:600;">purple</span></div>
+          <b>eCO₂ trend (last ${esc(limit)})</b>
+          <div class="legend">eCO₂ = <span style="color:#6a1b9a;font-weight:700;">purple</span></div>
         </div>
-        <div class="points">Points found: ${pointsInfo.eco2}/10</div>
+        <div class="points">Points: ${pointsInfo.eco2}/${limit}</div>
         <canvas id="trend-eco2" ${chartDataAttrs}></canvas>
       </div>
     `;
@@ -302,40 +376,173 @@ app.get("/", async (req, res) => {
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>AirBuddy Online</title>
+        <title>airBuddy | online</title>
+
+        <!-- Fonts (Arvo for title, Mulish for body) -->
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Arvo:wght@400;700&family=Mulish:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+
         <style>
-          :root { --border:#e6e6e6; --muted:#666; --panel:#fafafa; }
-          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; color:#111; }
-          h1 { margin: 0 0 6px; }
-          .sub { color: var(--muted); margin: 0 0 18px; }
+          :root {
+            --border:#e6e6e6;
+            --muted:#666;
+            --panel:#fafafa;
+          }
+
+          body {
+            font-family: "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
+            margin: 24px;
+            color:#111;
+          }
+
+          .brand {
+            font-family: "Arvo", Georgia, "Times New Roman", serif;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            margin: 0 0 6px;
+            font-size: 28px;
+          }
+
+          .sub {
+            color: var(--muted);
+            margin: 0 0 18px;
+            font-weight: 400;
+          }
+
           .links a { margin-right: 12px; }
 
-          .servertime { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--panel); margin: 14px 0 10px; }
-          .deviceinfo { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: #fff; margin: 0 0 18px; color: #222; }
+          .servertime {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: var(--panel);
+            margin: 14px 0 10px;
+          }
+
+          .deviceinfo {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: #fff;
+            margin: 0 0 18px;
+            color: #222;
+          }
           .deviceinfo .dot { margin: 0 8px; color: #bbb; }
           .muted { color: var(--muted); }
 
-          .chartwrap { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 0 0 14px; background: #fff; }
-          .charttitle { display:flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; }
-          .charttitle b { font-size: 16px; }
-          .legend { color: var(--muted); font-size: 13px; }
-          .points { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+          .charts-head {
+            display:flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin: 0 0 10px;
+          }
+
+          .limitform {
+            display:flex;
+            align-items:center;
+            gap: 10px;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: #fff;
+          }
+          .limitform label { font-weight: 700; }
+          .limitform select {
+            font-family: "Mulish", sans-serif;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: #fff;
+          }
+          .limitform button {
+            font-family: "Mulish", sans-serif;
+            padding: 8px 12px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: var(--panel);
+            cursor: pointer;
+            font-weight: 700;
+          }
+          .limitform button:hover { background: #f2f2f2; }
+
+          .chartwrap {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            margin: 0 0 14px;
+            background: #fff;
+          }
+
+          .charttitle {
+            display:flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 6px;
+            font-weight: 700;
+          }
+
+          .legend { color: var(--muted); font-size: 13px; font-weight: 600; }
+          .points { color: var(--muted); font-size: 12px; margin: 0 0 8px; font-weight: 400; }
           canvas { width: 100%; height: 220px; display: block; }
 
-          .entry { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin: 12px 0; background: #fff; }
-          .entry-head { display:flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+          .entry {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            margin: 12px 0;
+            background: #fff;
+          }
 
-          table.core { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 10px; }
-          table.core th, table.core td { text-align: left; padding: 10px 10px; border-top: 1px solid var(--border); vertical-align: top; }
-          table.core tr:first-child th, table.core tr:first-child td { border-top: none; }
-          table.core th { width: 140px; color: #222; background: #fcfcfc; font-weight: 600; }
+          .entry-head {
+            display:flex;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+            font-weight: 600;
+          }
 
-          .footerline { margin-top: 18px; color: var(--muted); font-size: 13px; }
+          table.core {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 10px;
+            font-weight: 400;
+          }
+
+          table.core th, table.core td {
+            text-align: left;
+            padding: 10px 10px;
+            border-top: 1px solid var(--border);
+            vertical-align: top;
+          }
+
+          table.core tr:first-child th, table.core tr:first-child td {
+            border-top: none;
+          }
+
+          table.core th {
+            width: 140px;
+            color: #222;
+            background: #fcfcfc;
+            font-weight: 700;
+          }
+
+          .footerline {
+            margin-top: 18px;
+            color: var(--muted);
+            font-size: 13px;
+          }
         </style>
       </head>
+
       <body>
-        <h1>AirBuddy Online</h1>
-        <p class="sub">Last 10 telemetry readings (device_id=1, ordered by <b>received_at</b>)</p>
+        <div class="brand">airBuddy | online</div>
+        <p class="sub">Last ${esc(limit)} telemetry readings (device_id=1, ordered by <b>received_at</b>)</p>
 
         <p class="links">
           <a href="/api/live">/api/live</a>
