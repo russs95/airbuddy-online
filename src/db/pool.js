@@ -1,4 +1,4 @@
-// db/pool.js
+// src/db/pool.js
 import mysql from "mysql2/promise";
 
 export function makePool(env) {
@@ -24,14 +24,27 @@ export function makePool(env) {
         connectionLimit: 10,
         queueLimit: 0,
 
-        // ✅ Interpret DATETIME as UTC when converting to JS Date
+        // IMPORTANT:
+        // Treat MySQL DATETIME values as UTC when converting to JS Date.
+        // We keep DB storage UTC and apply display timezone in the UI layer.
         timezone: "Z",
     });
 
-    // ✅ Ensure MySQL session time zone is UTC (NOW(), CURRENT_TIMESTAMP, etc.)
-    pool.on("connection", (conn) => {
-        conn.query("SET time_zone = '+00:00'").catch(() => {});
-    });
+    // Best-effort: ensure each MySQL session runs in UTC too.
+    // This avoids surprises if you ever use NOW() or time functions.
+    try {
+        if (pool && typeof pool.on === "function") {
+            pool.on("connection", (conn) => {
+                try {
+                    conn.query("SET time_zone = '+00:00'");
+                } catch {
+                    // ignore; do not crash
+                }
+            });
+        }
+    } catch {
+        // ignore; do not crash
+    }
 
     return pool;
 }
