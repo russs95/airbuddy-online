@@ -75,6 +75,13 @@ app.use("/api", systemRouter(pool, startedAt));
 app.use("/api", deviceAuth(pool), telemetryRouter(pool));
 app.use("/api", deviceAuth(pool), deviceRouter(pool));
 
+
+// ---- Global error handler (prints real stack) ----
+app.use((err, req, res, next) => {
+    console.error("UNHANDLED EXPRESS ERROR:", err && (err.stack || err));
+    res.status(500).type("text").send("server_error");
+});
+
 // ------------------------
 // Start Server
 // ------------------------
