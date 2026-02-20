@@ -1,8 +1,6 @@
 // src/pages/landing.js
 import express from "express";
 
-const DISPLAY_TZ = "Asia/Jakarta";
-
 // ------------------------
 // Helpers
 // ------------------------
@@ -40,43 +38,48 @@ const safeJsonParse = (v) => {
     return null;
 };
 
-const fmtJakarta = (d) => {
-    if (!d) return "";
-    const dt = d instanceof Date ? d : new Date(d);
-    if (Number.isNaN(dt.getTime())) return String(d);
+function makeFormatters(timeZone) {
+    const tz = typeof timeZone === "string" && timeZone.length ? timeZone : "Etc/UTC";
 
-    const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: DISPLAY_TZ,
-        year: "numeric",
-        month: "short",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-        timeZoneName: "short",
-    }).formatToParts(dt);
+    const fmtLong = (d) => {
+        if (!d) return "";
+        const dt = d instanceof Date ? d : new Date(d);
+        if (Number.isNaN(dt.getTime())) return String(d);
 
-    const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
-    return `${get("day")} ${get("month")} ${get("year")}, ${get("hour")}:${get(
-        "minute"
-    )}:${get("second")} ${get("timeZoneName")}`;
-};
+        const parts = new Intl.DateTimeFormat("en-GB", {
+            timeZone: tz,
+            year: "numeric",
+            month: "short",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+            timeZoneName: "short",
+        }).formatToParts(dt);
 
-// Short label for chart bottom ticks (you’ll use this in chart.js)
-const fmtJakartaShort = (d) => {
-    if (!d) return "";
-    const dt = d instanceof Date ? d : new Date(d);
-    if (Number.isNaN(dt.getTime())) return String(d);
+        const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
+        return `${get("day")} ${get("month")} ${get("year")}, ${get("hour")}:${get(
+            "minute"
+        )}:${get("second")} ${get("timeZoneName")}`;
+    };
 
-    // e.g. "07:50"
-    return new Intl.DateTimeFormat("en-GB", {
-        timeZone: DISPLAY_TZ,
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-    }).format(dt);
-};
+    // Short label for chart bottom ticks (e.g. "07:50")
+    const fmtShort = (d) => {
+        if (!d) return "";
+        const dt = d instanceof Date ? d : new Date(d);
+        if (Number.isNaN(dt.getTime())) return String(d);
+
+        return new Intl.DateTimeFormat("en-GB", {
+            timeZone: tz,
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+        }).format(dt);
+    };
+
+    return { tz, fmtLong, fmtShort };
+}
 
 const nOrNull = (x) => {
     if (x == null) return null;
@@ -116,6 +119,22 @@ const clampLimit = (raw) => {
 const countNonNull = (arr) => arr.reduce((a, v) => a + (v == null ? 0 : 1), 0);
 
 // ------------------------
+// Look up user's timezone (buwana_id=1 for now)
+// ------------------------
+async function fetchUserTimeZone(pool, buwanaId = 1) {
+    try {
+        const [rows] = await pool.query(
+            "SELECT time_zone FROM users_tb WHERE buwana_id = ? LIMIT 1",
+            [buwanaId]
+        );
+        const tz = rows?.[0]?.time_zone;
+        return typeof tz === "string" && tz.length ? tz : "Etc/UTC";
+    } catch {
+        return "Etc/UTC";
+    }
+}
+
+// ------------------------
 // Device summary (schema-aligned)
 // ------------------------
 async function fetchDeviceSummary(pool, deviceId = 1) {
@@ -149,29 +168,33 @@ export function landingRouter(pool) {
         try {
             const limit = clampLimit(req.query.limit);
 
-            // TODO: later make deviceId selectable (for now keep your current behavior)
+            // Current assumption for now:
+            // - buwana_id=1 owns the viewing session
+            // - device_id=1 is the primary device
+            const buwanaId = 1;
             const deviceId = 1;
+
+            // ✅ User timezone lookup happens here (render-time)
+            const userTz = await fetchUserTimeZone(pool, buwanaId);
+            const { tz, fmtLong, fmtShort } = makeFormatters(userTz);
 
             const deviceSummary = await fetchDeviceSummary(pool, deviceId);
 
-            // IMPORTANT CHANGE:
-            // - select telemetry_id
-            // - include recorded_at (device time)
-            // - still include received_at (server time)
-            // - order by recorded_at so chart and entries are consistent with device-time
+            // NOTE: With Option A (UTC in DB), these Date objects represent UTC instants.
+            // fmtLong/fmtShort converts them to the user's tz for display.
             const [rows] = await pool.query(
                 `
-        SELECT
-          tr.telemetry_id,
-          tr.device_id,
-          tr.recorded_at,
-          tr.received_at,
-          tr.values_json
-        FROM telemetry_readings_tb tr
-        WHERE tr.device_id = ?
-        ORDER BY tr.recorded_at DESC
-        LIMIT ?
-        `,
+                    SELECT
+                        tr.telemetry_id,
+                        tr.device_id,
+                        tr.recorded_at,
+                        tr.received_at,
+                        tr.values_json
+                    FROM telemetry_readings_tb tr
+                    WHERE tr.device_id = ?
+                    ORDER BY tr.recorded_at DESC
+                        LIMIT ?
+                `,
                 [deviceId, limit]
             );
 
@@ -179,7 +202,7 @@ export function landingRouter(pool) {
 
             const serverTimeLine = `
         <div class="servertime">
-          <b>Server time (Jakarta):</b> ${esc(fmtJakarta(now))}
+          <b>Server time (${esc(tz)}):</b> ${esc(fmtLong(now))}
         </div>
       `;
 
@@ -213,9 +236,8 @@ export function landingRouter(pool) {
             const eco2s = [];
 
             for (const r of chronological) {
-                // IMPORTANT CHANGE: use recorded_at for time labels (device time)
-                labelsLong.push(r?.recorded_at ? fmtJakarta(r.recorded_at) : "");
-                labelsShort.push(r?.recorded_at ? fmtJakartaShort(r.recorded_at) : "");
+                labelsLong.push(r?.recorded_at ? fmtLong(r.recorded_at) : "");
+                labelsShort.push(r?.recorded_at ? fmtShort(r.recorded_at) : "");
 
                 const obj = safeJsonParse(r.values_json);
                 const core = pickCore(obj);
@@ -234,7 +256,6 @@ export function landingRouter(pool) {
             };
 
             // Chart data as data-* attributes on each canvas (CSP-safe)
-            // NOTE: chart.js parses these attributes.
             const chartDataAttrs = `
         data-limit='${esc(limit)}'
         data-labels-long='${esc(JSON.stringify(labelsLong))}'
@@ -245,7 +266,6 @@ export function landingRouter(pool) {
         data-eco2s='${esc(JSON.stringify(eco2s))}'
       `;
 
-            // Dropdown (no JS required; just submit GET)
             const limitControl = `
         <form class="limitform" method="GET" action="/">
           <label for="limit"><b>Chart range:</b></label>
@@ -258,7 +278,6 @@ export function landingRouter(pool) {
         </form>
       `;
 
-            // Entries (latest first)
             const entriesHtml = rows
                 .map((r) => {
                     const obj = safeJsonParse(r.values_json);
@@ -271,9 +290,9 @@ export function landingRouter(pool) {
             <div class="entry">
               <div class="entry-head">
                 <div>
-                  <b>recorded:</b> ${esc(r.recorded_at ? fmtJakarta(r.recorded_at) : "—")}
+                  <b>recorded:</b> ${esc(r.recorded_at ? fmtLong(r.recorded_at) : "—")}
                   <span class="dot">•</span>
-                  <b>received:</b> ${esc(r.received_at ? fmtJakarta(r.received_at) : "—")}
+                  <b>received:</b> ${esc(r.received_at ? fmtLong(r.received_at) : "—")}
                 </div>
                 <div class="muted">${esc(rightLabel)}</div>
               </div>
@@ -295,21 +314,20 @@ export function landingRouter(pool) {
                 })
                 .join("\n");
 
-            // Charts
             const chartsHtml = `
         <div class="charts-head">
           ${limitControl}
           <div class="hint">
-            <span class="muted">X-axis shows 5 ticks; times shown at start / middle / end (device recorded_at).</span>
+            <span class="muted">X-axis shows 5 ticks; times shown at start / middle / end (device recorded_at in ${esc(
+                tz
+            )}).</span>
           </div>
         </div>
 
         <div class="chartwrap">
           <div class="charttitle">
             <b>Temperature trend (last ${esc(limit)})</b>
-            <div class="legend">
-              Temp + RTC Temp
-            </div>
+            <div class="legend">Temp + RTC Temp</div>
           </div>
           <div class="points">Temp points: ${pointsInfo.temp}/${limit} &nbsp; | &nbsp; RTC points: ${pointsInfo.rtcTemp}/${limit}</div>
           <canvas id="trend-temp" ${chartDataAttrs}></canvas>
@@ -340,7 +358,6 @@ export function landingRouter(pool) {
           <meta name="viewport" content="width=device-width, initial-scale=1" />
           <title>airBuddy | online</title>
 
-          <!-- Fonts (Arvo for title, Mulish for body) -->
           <link rel="preconnect" href="https://fonts.googleapis.com">
           <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
           <link href="https://fonts.googleapis.com/css2?family=Arvo:wght@400;700&family=Mulish:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
@@ -520,10 +537,9 @@ export function landingRouter(pool) {
           ${rows.length ? entriesHtml : `<p>No telemetry readings yet.</p>`}
 
           <div class="footerline">
-            recorded_at is device time; received_at is server/DB time (DEFAULT CURRENT_TIMESTAMP).
+            DB stores UTC; page displays times in <b>${esc(tz)}</b> (from users_tb.time_zone).
           </div>
 
-          <!-- CSP-safe external script include -->
           <script src="/static/chart.js"></script>
         </body>
         </html>

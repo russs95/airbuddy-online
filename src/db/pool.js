@@ -1,3 +1,4 @@
+// db/pool.js
 import mysql from "mysql2/promise";
 
 export function makePool(env) {
@@ -13,7 +14,7 @@ export function makePool(env) {
         throw new Error("Missing DB env vars. Check .env");
     }
 
-    return mysql.createPool({
+    const pool = mysql.createPool({
         host: DB_HOST,
         port: Number(DB_PORT),
         user: DB_USER,
@@ -22,6 +23,15 @@ export function makePool(env) {
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
+
+        // ✅ Interpret DATETIME as UTC when converting to JS Date
         timezone: "Z",
     });
+
+    // ✅ Ensure MySQL session time zone is UTC (NOW(), CURRENT_TIMESTAMP, etc.)
+    pool.on("connection", (conn) => {
+        conn.query("SET time_zone = '+00:00'").catch(() => {});
+    });
+
+    return pool;
 }
