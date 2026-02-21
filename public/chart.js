@@ -1,63 +1,30 @@
 // public/chart.js
 (function () {
-    // ----------------------------
-    // Read data-* payload from canvas
-    // ----------------------------
-    function getDataFromCanvas(canvas) {
-        const read = (name) => {
-            const raw = canvas.getAttribute(name);
-            if (!raw) return [];
-            try {
-                return JSON.parse(raw);
-            } catch {
-                return [];
-            }
-        };
+    // -------------------------------------------------
+    // Configurable time ranges (hours)
+    // -------------------------------------------------
+    const RANGES = {
+        "6h": 6,
+        "24h": 24,
+        "72h": 72,
+        "7d": 24 * 7,
+        "30d": 24 * 30,
+    };
 
-        // New server.js writes: data-labels-short + data-labels-long
-        // Backward compatible: if missing, fall back to data-labels
-        const labelsShort = read("data-labels-short");
-        const labelsLong = read("data-labels-long");
-        const labelsLegacy = read("data-labels");
-
-        return {
-            labelsShort:
-                Array.isArray(labelsShort) && labelsShort.length ? labelsShort : labelsLegacy,
-            labelsLong:
-                Array.isArray(labelsLong) && labelsLong.length ? labelsLong : labelsLegacy,
-
-            temps: read("data-temps"),
-            rtcTemps: read("data-rtc-temps"), // NEW
-            rhs: read("data-rhs"),
-            eco2s: read("data-eco2s"),
-        };
-    }
-
-    // ----------------------------
-    // Numeric helpers
-    // ----------------------------
-    function finiteVals(arr) {
-        const out = [];
-        for (const v of arr) {
-            if (v == null) continue;
-            const n = Number(v);
-            if (Number.isFinite(n)) out.push(n);
+    // -------------------------------------------------
+    // Helpers
+    // -------------------------------------------------
+    function readJSONAttr(canvas, name) {
+        const raw = canvas.getAttribute(name);
+        if (!raw) return [];
+        try {
+            return JSON.parse(raw);
+        } catch {
+            return [];
         }
-        return out;
-    }
-
-    function finiteValsMany(seriesList) {
-        const out = [];
-        for (const s of seriesList) {
-            if (!s || !Array.isArray(s.data)) continue;
-            const vals = finiteVals(s.data);
-            for (const v of vals) out.push(v);
-        }
-        return out;
     }
 
     function niceStep(targetStep) {
-        // "Nice numbers" for steps: 1,2,5 * 10^k
         if (!Number.isFinite(targetStep) || targetStep <= 0) return 1;
         const pow = Math.pow(10, Math.floor(Math.log10(targetStep)));
         const base = targetStep / pow;
@@ -70,40 +37,137 @@
     }
 
     function niceBounds(minV, maxV, ticks) {
-        if (!Number.isFinite(minV) || !Number.isFinite(maxV)) return { min: 0, max: 1, step: 1 };
+        if (!Number.isFinite(minV) || !Number.isFinite(maxV))
+            return { min: 0, max: 1, step: 1 };
+
         if (minV === maxV) {
             const pad = minV === 0 ? 1 : Math.abs(minV) * 0.1;
             minV -= pad;
             maxV += pad;
         }
+
         const span = maxV - minV;
         const rawStep = span / Math.max(1, ticks - 1);
         const step = niceStep(rawStep);
 
-        const niceMin = Math.floor(minV / step) * step;
-        const niceMax = Math.ceil(maxV / step) * step;
-
-        if (niceMin === niceMax) return { min: niceMin, max: niceMax + step, step };
-        return { min: niceMin, max: niceMax, step };
+        return {
+            min: Math.floor(minV / step) * step,
+            max: Math.ceil(maxV / step) * step,
+            step,
+        };
     }
 
-    // ----------------------------
-    // Drawing primitives
-    // ----------------------------
-    function drawLine(ctx, series, xMap, yMap, strokeStyle, width) {
-        ctx.strokeStyle = strokeStyle;
-        ctx.lineWidth = width || 2;
+    function formatTime(ts) {
+        const d = new Date(ts * 1000);
+        return d.toLocaleString(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+            day: "2-digit",
+            month: "short",
+        });
+    }
+
+    // -------------------------------------------------
+    // Draw Temperature Chart
+    // -------------------------------------------------
+    function drawChart(canvas, timestamps, temps, rangeKey) {
+        const ctx = canvas.getContext("2d");
+        const hours = RANGES[rangeKey] || 24;
+
+        const now = Math.floor(Date.now() / 1000);
+        const cutoff = now - hours * 3600;
+
+        // Filter by time window
+        const data = [];
+        for (let i = 0; i < timestamps.length; i++) {
+            if (timestamps[i] >= cutoff && temps[i] != null) {
+                data.push({ t: timestamps[i], v: Number(temps[i]) });
+            }
+        }
+
+        if (!data.length) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillText("No data in range", 10, 20);
+            return;
+        }
+
+        // Setup canvas scaling
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const W = rect.width;
+        const H = rect.height;
+
+        const padL = 60;
+        const padR = 20;
+        const padT = 20;
+        const padB = 50;
+
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
+
+        const minT = cutoff;
+        const maxT = now;
+
+        const minV = Math.min(...data.map(d => d.v));
+        const maxV = Math.max(...data.map(d => d.v));
+        const yBounds = niceBounds(minV, maxV, 5);
+
+        const xMap = t =>
+            padL + ((t - minT) / (maxT - minT)) * plotW;
+
+        const yMap = v =>
+            padT + (1 - (v - yBounds.min) / (yBounds.max - yBounds.min)) * plotH;
+
+        ctx.clearRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = "#eee";
         ctx.beginPath();
+        for (let i = 0; i <= 4; i++) {
+            const y = padT + (i / 4) * plotH;
+            ctx.moveTo(padL, y);
+            ctx.lineTo(padL + plotW, y);
+        }
+        ctx.stroke();
+
+        // Axes
+        ctx.strokeStyle = "#ccc";
+        ctx.beginPath();
+        ctx.moveTo(padL, padT);
+        ctx.lineTo(padL, padT + plotH);
+        ctx.lineTo(padL + plotW, padT + plotH);
+        ctx.stroke();
+
+        // Y labels
+        ctx.fillStyle = "#666";
+        ctx.font = "12px Mulish";
+        for (let i = 0; i <= 4; i++) {
+            const v = yBounds.max - (i / 4) * (yBounds.max - yBounds.min);
+            const y = padT + (i / 4) * plotH;
+            ctx.fillText(v.toFixed(1) + "°C", 8, y + 4);
+        }
+
+        // Time labels (start/mid/end)
+        const mid = Math.floor((minT + maxT) / 2);
+
+        ctx.fillStyle = "#777";
+        ctx.fillText(formatTime(minT), padL, padT + plotH + 25);
+        ctx.fillText(formatTime(mid), padL + plotW / 2 - 40, padT + plotH + 25);
+        ctx.fillText(formatTime(maxT), padL + plotW - 80, padT + plotH + 25);
+
+        // Temperature line
+        ctx.strokeStyle = "#c62828";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
         let started = false;
-
-        for (let i = 0; i < series.length; i++) {
-            const v = series[i];
-            if (v == null) continue;
-            const n = Number(v);
-            if (!Number.isFinite(n)) continue;
-
-            const x = xMap(i);
-            const y = yMap(n);
+        for (const d of data) {
+            const x = xMap(d.t);
+            const y = yMap(d.v);
 
             if (!started) {
                 ctx.moveTo(x, y);
@@ -115,318 +179,25 @@
         ctx.stroke();
     }
 
-    function drawPoints(ctx, series, xMap, yMap, fillStyle, radius) {
-        ctx.fillStyle = fillStyle;
-        const r = radius == null ? 3 : radius;
-
-        for (let i = 0; i < series.length; i++) {
-            const v = series[i];
-            if (v == null) continue;
-            const n = Number(v);
-            if (!Number.isFinite(n)) continue;
-
-            const x = xMap(i);
-            const y = yMap(n);
-            ctx.beginPath();
-            ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fill();
-        }
-    }
-
-    function drawTextCentered(ctx, text, x, y) {
-        const w = ctx.measureText(text).width;
-        ctx.fillText(text, x - w / 2, y);
-    }
-
-    // ----------------------------
-    // Single-series chart (RH, eCO2)
-    // ----------------------------
-    function drawSeries(canvas, series, labelsShort, color, yLabelFmt) {
-        const ctx = canvas.getContext("2d");
-
-        function resizeAndDraw() {
-            const dpr = window.devicePixelRatio || 1;
-            const rect = canvas.getBoundingClientRect();
-
-            canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-            canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            draw(rect.width, rect.height);
-        }
-
-        function draw(W, H) {
-            ctx.clearRect(0, 0, W, H);
-
-            const padL = 52;
-            const padR = 18;
-            const padT = 16;
-            const padB = 44;
-
-            const plotW = Math.max(1, W - padL - padR);
-            const plotH = Math.max(1, H - padT - padB);
-
-            const n = Math.max(series.length, 1);
-            const xMap = (i) => padL + (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
-
-            const vals = finiteVals(series);
-            const rawMin = vals.length ? Math.min(...vals) : 0;
-            const rawMax = vals.length ? Math.max(...vals) : 1;
-            const nb = niceBounds(rawMin, rawMax, 5);
-
-            const yMap = (v) => {
-                const t = (v - nb.min) / (nb.max - nb.min);
-                return padT + (1 - t) * plotH;
-            };
-
-            // --- Grid
-            ctx.strokeStyle = "#eee";
-            ctx.lineWidth = 1;
-
-            ctx.beginPath();
-            for (let k = 0; k <= 4; k++) {
-                const y = padT + (k * plotH) / 4;
-                ctx.moveTo(padL, y);
-                ctx.lineTo(padL + plotW, y);
-            }
-
-            for (let k = 0; k <= 4; k++) {
-                const x = padL + (k * plotW) / 4;
-                ctx.moveTo(x, padT);
-                ctx.lineTo(x, padT + plotH);
-            }
-            ctx.stroke();
-
-            // --- Axes
-            ctx.strokeStyle = "#ddd";
-            ctx.beginPath();
-            ctx.moveTo(padL, padT);
-            ctx.lineTo(padL, padT + plotH);
-            ctx.lineTo(padL + plotW, padT + plotH);
-            ctx.stroke();
-
-            // --- Y labels
-            ctx.fillStyle = "#666";
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-
-            for (let k = 0; k <= 4; k++) {
-                const v = nb.max - (k * (nb.max - nb.min)) / 4;
-                const y = padT + (k * plotH) / 4;
-                const label = yLabelFmt(v);
-                ctx.fillText(label, 6, y + 4);
-            }
-
-            // --- Bottom labels
-            const safeLabels = Array.isArray(labelsShort) ? labelsShort : [];
-            const idx0 = 0;
-            const idxMid = Math.floor((n - 1) / 2);
-            const idxEnd = Math.max(0, n - 1);
-
-            const t0 = safeLabels[idx0] ?? "";
-            const tMid = safeLabels[idxMid] ?? "";
-            const tEnd = safeLabels[idxEnd] ?? "";
-
-            ctx.fillStyle = "#777";
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-
-            const yTime = padT + plotH + 22;
-
-            if (t0) drawTextCentered(ctx, t0, xMap(idx0), yTime);
-            if (tMid) drawTextCentered(ctx, tMid, xMap(idxMid), yTime);
-            if (tEnd) drawTextCentered(ctx, tEnd, xMap(idxEnd), yTime);
-
-            // --- Series
-            drawLine(ctx, series, xMap, yMap, color, 2);
-            drawPoints(ctx, series, xMap, yMap, color, 3);
-        }
-
-        // One resize handler per canvas
-        if (!canvas.__airbuddyResizeBound) {
-            canvas.__airbuddyResizeBound = true;
-            window.addEventListener("resize", resizeAndDraw);
-        }
-        resizeAndDraw();
-    }
-
-    // ----------------------------
-    // Multi-series chart (Temp + RTC Temp)
-    // ----------------------------
-    function drawMultiSeries(canvas, seriesList, labelsShort, yLabelFmt) {
-        const ctx = canvas.getContext("2d");
-
-        function resizeAndDraw() {
-            const dpr = window.devicePixelRatio || 1;
-            const rect = canvas.getBoundingClientRect();
-
-            canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-            canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            draw(rect.width, rect.height);
-        }
-
-        function draw(W, H) {
-            ctx.clearRect(0, 0, W, H);
-
-            const padL = 52;
-            const padR = 18;
-            const padT = 16;
-            const padB = 44;
-
-            const plotW = Math.max(1, W - padL - padR);
-            const plotH = Math.max(1, H - padT - padB);
-
-            const n = Math.max((seriesList && seriesList[0] && seriesList[0].data ? seriesList[0].data.length : 0), 1);
-            const xMap = (i) => padL + (n === 1 ? plotW / 2 : (i * plotW) / (n - 1));
-
-            // Bounds computed from ALL series
-            const vals = finiteValsMany(seriesList);
-            const rawMin = vals.length ? Math.min(...vals) : 0;
-            const rawMax = vals.length ? Math.max(...vals) : 1;
-            const nb = niceBounds(rawMin, rawMax, 5);
-
-            const yMap = (v) => {
-                const t = (v - nb.min) / (nb.max - nb.min);
-                return padT + (1 - t) * plotH;
-            };
-
-            // --- Grid
-            ctx.strokeStyle = "#eee";
-            ctx.lineWidth = 1;
-
-            ctx.beginPath();
-            for (let k = 0; k <= 4; k++) {
-                const y = padT + (k * plotH) / 4;
-                ctx.moveTo(padL, y);
-                ctx.lineTo(padL + plotW, y);
-            }
-
-            for (let k = 0; k <= 4; k++) {
-                const x = padL + (k * plotW) / 4;
-                ctx.moveTo(x, padT);
-                ctx.lineTo(x, padT + plotH);
-            }
-            ctx.stroke();
-
-            // --- Axes
-            ctx.strokeStyle = "#ddd";
-            ctx.beginPath();
-            ctx.moveTo(padL, padT);
-            ctx.lineTo(padL, padT + plotH);
-            ctx.lineTo(padL + plotW, padT + plotH);
-            ctx.stroke();
-
-            // --- Y labels
-            ctx.fillStyle = "#666";
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-
-            for (let k = 0; k <= 4; k++) {
-                const v = nb.max - (k * (nb.max - nb.min)) / 4;
-                const y = padT + (k * plotH) / 4;
-                const label = yLabelFmt(v);
-                ctx.fillText(label, 6, y + 4);
-            }
-
-            // --- Bottom labels (3: start/mid/end)
-            const safeLabels = Array.isArray(labelsShort) ? labelsShort : [];
-            const idx0 = 0;
-            const idxMid = Math.floor((n - 1) / 2);
-            const idxEnd = Math.max(0, n - 1);
-
-            const t0 = safeLabels[idx0] ?? "";
-            const tMid = safeLabels[idxMid] ?? "";
-            const tEnd = safeLabels[idxEnd] ?? "";
-
-            ctx.fillStyle = "#777";
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-
-            const yTime = padT + plotH + 22;
-
-            if (t0) drawTextCentered(ctx, t0, xMap(idx0), yTime);
-            if (tMid) drawTextCentered(ctx, tMid, xMap(idxMid), yTime);
-            if (tEnd) drawTextCentered(ctx, tEnd, xMap(idxEnd), yTime);
-
-            // --- Series: draw each (line + points)
-            for (const s of seriesList) {
-                if (!s || !Array.isArray(s.data)) continue;
-                drawLine(ctx, s.data, xMap, yMap, s.color || "#000", s.width || 2);
-                drawPoints(ctx, s.data, xMap, yMap, s.color || "#000", s.pointRadius == null ? 3 : s.pointRadius);
-            }
-
-            // --- Tiny legend (top-right inside plot)
-            // Keeps it lightweight + readable
-            let lx = padL + plotW - 8;
-            let ly = padT + 2;
-
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-            ctx.textAlign = "right";
-            ctx.textBaseline = "top";
-
-            for (const s of seriesList) {
-                if (!s || !s.name) continue;
-                ctx.fillStyle = s.color || "#000";
-                ctx.fillText(s.name, lx, ly);
-                ly += 14;
-            }
-
-            // reset alignment
-            ctx.textAlign = "left";
-            ctx.textBaseline = "alphabetic";
-        }
-
-        // One resize handler per canvas
-        if (!canvas.__airbuddyResizeBound) {
-            canvas.__airbuddyResizeBound = true;
-            window.addEventListener("resize", resizeAndDraw);
-        }
-        resizeAndDraw();
-    }
-
-    // ----------------------------
+    // -------------------------------------------------
     // Boot
-    // ----------------------------
+    // -------------------------------------------------
     function boot() {
-        const cTemp = document.getElementById("trend-temp");
-        const cRh = document.getElementById("trend-rh");
-        const cEco2 = document.getElementById("trend-eco2");
-        if (!cTemp || !cRh || !cEco2) return;
+        const canvas = document.getElementById("trend-temp");
+        const select = document.getElementById("range-select");
+        if (!canvas || !select) return;
 
-        // All three canvases carry the same payload; read from first.
-        const data = getDataFromCanvas(cTemp);
+        const timestamps = readJSONAttr(canvas, "data-timestamps");
+        const temps = readJSONAttr(canvas, "data-temps");
 
-        // TEMP: draw two lines (temp + rtc temp)
-        drawMultiSeries(
-            cTemp,
-            [
-                { name: "Temp", data: data.temps || [], color: "#c62828", width: 2, pointRadius: 3 },
-                { name: "RTC", data: data.rtcTemps || [], color: "#2e7d32", width: 2, pointRadius: 3 },
-            ],
-            data.labelsShort || [],
-            (v) => v.toFixed(1) + "°C"
-        );
+        function redraw() {
+            drawChart(canvas, timestamps, temps, select.value);
+        }
 
-        // RH
-        drawSeries(
-            cRh,
-            data.rhs || [],
-            data.labelsShort || [],
-            "#1565c0",
-            (v) => v.toFixed(1) + "%"
-        );
+        select.addEventListener("change", redraw);
+        window.addEventListener("resize", redraw);
 
-        // eCO2
-        drawSeries(
-            cEco2,
-            data.eco2s || [],
-            data.labelsShort || [],
-            "#6a1b9a",
-            (v) => v.toFixed(0) + " ppm"
-        );
+        redraw();
     }
 
     boot();
