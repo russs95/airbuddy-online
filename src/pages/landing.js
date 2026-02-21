@@ -11,50 +11,30 @@ const esc = (s) =>
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
 
-function makeFormatters(timeZone) {
-    const tz = timeZone || "Etc/UTC";
+function safeJsonParse(v) {
+    if (!v) return null;
+    if (typeof v === "object") return v;
+    if (typeof v === "string") {
+        try { return JSON.parse(v); } catch { return null; }
+    }
+    return null;
+}
 
-    const fmtLong = (d) => {
-        if (!d) return "";
-        const dt = d instanceof Date ? d : new Date(d);
-        if (Number.isNaN(dt.getTime())) return String(d);
-
-        return new Intl.DateTimeFormat("en-GB", {
-            timeZone: tz,
-            year: "numeric",
-            month: "short",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-        }).format(dt);
-    };
-
-    return { tz, fmtLong };
+function fmtDate(d) {
+    if (!d) return "—";
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return "—";
+    return dt.toISOString().replace("T", " ").substring(0, 19) + " UTC";
 }
 
 // ------------------------
-// Device Summary (extended)
+// Device lookup
 // ------------------------
-async function fetchDeviceSummary(pool, deviceId = 1) {
+async function fetchDevice(pool, deviceId = 1) {
     const sql = `
-        SELECT
-            d.device_id,
-            d.device_name,
-            d.device_type,
-            d.firmware_version,
-            d.status,
-            d.last_seen_at,
-            d.created_at,
-
-            h.home_name,
-            r.room_name
-
-        FROM devices_tb d
-        LEFT JOIN homes_tb h ON h.home_id = d.home_id
-        LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-        WHERE d.device_id = ?
+        SELECT *
+        FROM devices_tb
+        WHERE device_id = ?
         LIMIT 1
     `;
     const [rows] = await pool.query(sql, [deviceId]);
@@ -62,7 +42,7 @@ async function fetchDeviceSummary(pool, deviceId = 1) {
 }
 
 // ------------------------
-// Landing Router
+// Landing router
 // ------------------------
 export function landingRouter(pool) {
     const router = express.Router();
@@ -71,9 +51,10 @@ export function landingRouter(pool) {
         try {
             const deviceId = 1;
 
-            const device = await fetchDeviceSummary(pool, deviceId);
+            const device = await fetchDevice(pool, deviceId);
 
-            const [rows] = await pool.query(
+            // --- ALL telemetry for chart ---
+            const [allRows] = await pool.query(
                 `
                 SELECT recorded_at, values_json
                 FROM telemetry_readings_tb
@@ -83,29 +64,49 @@ export function landingRouter(pool) {
                 [deviceId]
             );
 
-            // --- Build chart arrays ---
             const timestamps = [];
             const temps = [];
 
-            for (const r of rows) {
+            for (const r of allRows) {
                 if (!r.recorded_at) continue;
 
                 const ts = Math.floor(new Date(r.recorded_at).getTime() / 1000);
                 timestamps.push(ts);
 
-                try {
-                    const obj = JSON.parse(r.values_json);
-                    temps.push(obj?.temp_c ?? null);
-                } catch {
-                    temps.push(null);
-                }
+                const obj = safeJsonParse(r.values_json);
+                temps.push(obj?.temp_c ?? null);
             }
 
-            // --- Online status (last_seen within 121s) ---
+            // --- Latest 10 entries (separate query) ---
+            const [latestRows] = await pool.query(
+                `
+                SELECT telemetry_id, recorded_at, received_at, values_json
+                FROM telemetry_readings_tb
+                WHERE device_id = ?
+                ORDER BY recorded_at DESC
+                LIMIT 10
+                `,
+                [deviceId]
+            );
+
+            const latestHtml = latestRows.map(r => {
+                const obj = safeJsonParse(r.values_json);
+                return `
+                    <div class="entry">
+                        <div><b>Recorded:</b> ${esc(fmtDate(r.recorded_at))}</div>
+                        <div><b>Received:</b> ${esc(fmtDate(r.received_at))}</div>
+                        <div><b>Temp:</b> ${esc(obj?.temp_c ?? "—")} °C</div>
+                        <div><b>Humidity:</b> ${esc(obj?.rh ?? "—")} %</div>
+                        <div><b>eCO₂:</b> ${esc(obj?.eco2_ppm ?? "—")} ppm</div>
+                    </div>
+                `;
+            }).join("");
+
+            // --- Online indicator ---
             let online = false;
             if (device?.last_seen_at) {
-                const last = new Date(device.last_seen_at).getTime();
-                const diffSec = (Date.now() - last) / 1000;
+                const diffSec =
+                    (Date.now() - new Date(device.last_seen_at).getTime()) / 1000;
                 online = diffSec <= 121;
             }
 
@@ -115,23 +116,21 @@ export function landingRouter(pool) {
 
             const deviceBox = device
                 ? `
-            <details class="devicebox">
-                <summary>
-                    <b>${esc(device.device_name)}</b>
-                    ${onlineBadge}
-                </summary>
-
-                <div class="device-details">
-                    <div><b>Home:</b> ${esc(device.home_name)}</div>
-                    <div><b>Room:</b> ${esc(device.room_name)}</div>
-                    <div><b>Device Type:</b> ${esc(device.device_type)}</div>
-                    <div><b>Firmware:</b> ${esc(device.firmware_version)}</div>
-                    <div><b>Status:</b> ${esc(device.status)}</div>
-                    <div><b>Last Seen:</b> ${esc(device.last_seen_at)}</div>
-                    <div><b>Created:</b> ${esc(device.created_at)}</div>
-                </div>
-            </details>
-            `
+                <details class="devicebox">
+                    <summary>
+                        <b>${esc(device.device_name ?? "Device 1")}</b>
+                        ${onlineBadge}
+                    </summary>
+                    <div class="device-details">
+                        <div><b>Device UID:</b> ${esc(device.device_uid)}</div>
+                        <div><b>Device Type:</b> ${esc(device.device_type)}</div>
+                        <div><b>Firmware:</b> ${esc(device.firmware_version)}</div>
+                        <div><b>Status:</b> ${esc(device.status)}</div>
+                        <div><b>Last Seen:</b> ${esc(fmtDate(device.last_seen_at))}</div>
+                        <div><b>Created:</b> ${esc(fmtDate(device.created_at))}</div>
+                    </div>
+                </details>
+                `
                 : `<div class="devicebox">Device not found</div>`;
 
             const html = `
@@ -142,7 +141,6 @@ export function landingRouter(pool) {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>airBuddy | online</title>
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Arvo:wght@700&family=Mulish:wght@400;600&display=swap" rel="stylesheet">
 
 <style>
@@ -160,34 +158,32 @@ body { font-family: Mulish, sans-serif; margin: 24px; }
 
 .devicebox summary {
     cursor:pointer;
-    font-weight:600;
     display:flex;
     justify-content:space-between;
     align-items:center;
 }
 
-.device-details {
-    margin-top:12px;
-    font-size:14px;
-    color:#444;
-}
+.device-details { margin-top:12px; font-size:14px; }
 
-.online { color: #2e7d32; font-weight:600; }
-.offline { color: #999; font-weight:600; }
+.online { color:#2e7d32; font-weight:600; }
+.offline { color:#999; font-weight:600; }
 
 .chartwrap {
     border:1px solid #e6e6e6;
     border-radius:12px;
     padding:14px;
     background:#fff;
+    margin-bottom:20px;
 }
 
 canvas { width:100%; height:260px; display:block; }
 
-select {
-    padding:8px 10px;
-    border-radius:8px;
+.entry {
+    border:1px solid #e6e6e6;
+    border-radius:12px;
+    padding:12px;
     margin-bottom:10px;
+    background:#fff;
 }
 </style>
 </head>
@@ -215,10 +211,14 @@ ${deviceBox}
     ></canvas>
 </div>
 
+<h3>Latest 10 Telemetry Readings</h3>
+${latestHtml || "<p>No telemetry yet.</p>"}
+
 <script src="/static/chart.js"></script>
+
 </body>
 </html>
-            `;
+`;
 
             res.status(200).send(html);
         } catch (e) {
