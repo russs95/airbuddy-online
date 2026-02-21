@@ -1,5 +1,6 @@
 // src/pages/landing.js
 import express from "express";
+import crypto from "crypto";
 
 // ------------------------
 // Helpers
@@ -103,6 +104,11 @@ function toUnixSeconds(d) {
     return Math.floor(ms / 1000);
 }
 
+function makeNonce() {
+    // base64 nonce for CSP
+    return crypto.randomBytes(16).toString("base64");
+}
+
 // ------------------------
 // Time range (for UI + server fetch cap)
 // NOTE: charts filter client-side; server just sends "enough" points.
@@ -187,6 +193,30 @@ export function landingRouter(pool) {
 
     router.get("/", async (req, res) => {
         try {
+            // Ensure we have a CSP nonce for inline scripts (theme + range-sync)
+            // If server.js already sets res.locals.cspNonce, we reuse it.
+            const nonce = res.locals?.cspNonce || makeNonce();
+            if (!res.locals) res.locals = {};
+            res.locals.cspNonce = nonce;
+
+            // If upstream CSP is missing/doesn't include nonce, set a page CSP here.
+            // This avoids the "blocked inline script" issue and keeps everything CSP-safe.
+            // (If you already set CSP with helmet + nonce, this will simply overwrite it for this response.)
+            res.setHeader(
+                "Content-Security-Policy",
+                [
+                    "default-src 'self'",
+                    `script-src 'self' 'nonce-${nonce}'`,
+                    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+                    "font-src 'self' https://fonts.gstatic.com data:",
+                    "img-src 'self' data:",
+                    "connect-src 'self'",
+                    "object-src 'none'",
+                    "base-uri 'self'",
+                    "frame-ancestors 'none'",
+                ].join("; ")
+            );
+
             // Current assumption for now:
             // - buwana_id=1 owns the viewing session
             // - device_id=1 is the primary device
@@ -215,33 +245,33 @@ export function landingRouter(pool) {
 
             const [chartRows] = await pool.query(
                 `
-                SELECT
-                    telemetry_id,
-                    device_id,
-                    recorded_at,
-                    received_at,
-                    values_json
-                FROM telemetry_readings_tb
-                WHERE device_id = ?
-                  AND recorded_at >= FROM_UNIXTIME(?)
-                ORDER BY recorded_at ASC
-                LIMIT ?
+                    SELECT
+                        telemetry_id,
+                        device_id,
+                        recorded_at,
+                        received_at,
+                        values_json
+                    FROM telemetry_readings_tb
+                    WHERE device_id = ?
+                      AND recorded_at >= FROM_UNIXTIME(?)
+                    ORDER BY recorded_at ASC
+                        LIMIT ?
                 `,
                 [deviceId, cutoffUnix, MAX_POINTS]
             );
 
             const [latestRows] = await pool.query(
                 `
-                SELECT
-                    telemetry_id,
-                    device_id,
-                    recorded_at,
-                    received_at,
-                    values_json
-                FROM telemetry_readings_tb
-                WHERE device_id = ?
-                ORDER BY recorded_at DESC
-                LIMIT 10
+                    SELECT
+                        telemetry_id,
+                        device_id,
+                        recorded_at,
+                        received_at,
+                        values_json
+                    FROM telemetry_readings_tb
+                    WHERE device_id = ?
+                    ORDER BY recorded_at DESC
+                        LIMIT 10
                 `,
                 [deviceId]
             );
@@ -253,7 +283,7 @@ export function landingRouter(pool) {
                 lastReceivedAt = latestRows[0]?.received_at ?? null;
                 const lastReceivedUnix = toUnixSeconds(lastReceivedAt);
                 if (lastReceivedUnix != null) {
-                    online = (nowUnix - lastReceivedUnix) <= 121;
+                    online = nowUnix - lastReceivedUnix <= 121;
                 }
             }
 
@@ -358,9 +388,6 @@ export function landingRouter(pool) {
                         <option value="30d" ${rangeKey === "30d" ? "selected" : ""}>Last month</option>
                     </select>
                     <button type="submit">Apply</button>
-
-                    <!-- Shared selector for JS charts (kept in sync with GET by default) -->
-                    <input type="hidden" id="range-select-shadow" value="${esc(rangeKey)}" />
                 </form>
             `;
 
@@ -376,12 +403,6 @@ export function landingRouter(pool) {
             const chartsHtml = `
                 <div class="charts-head">
                     ${rangeControl}
-
-                    <div class="modes">
-                        <button id="modeToggle" class="modebtn" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
-                            ◐
-                        </button>
-                    </div>
                 </div>
 
                 <!-- Shared selector consumed by chart scripts -->
@@ -535,11 +556,25 @@ export function landingRouter(pool) {
 
         .sub {
             color: var(--muted);
-            margin: 0 0 18px;
+            margin: 0 0 10px;
             font-weight: 400;
         }
 
         .links a { margin-right: 12px; color: inherit; }
+        .links { margin: 0 0 10px; }
+
+        .modes { display:flex; align-items: center; gap: 10px; }
+
+        .modebtn {
+            border: 1px solid var(--border);
+            background: var(--card);
+            color: var(--fg);
+            border-radius: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+            font-weight: 800;
+            line-height: 1;
+        }
 
         .servertime {
             border: 1px solid var(--border);
@@ -652,19 +687,6 @@ export function landingRouter(pool) {
             color: var(--fg);
         }
 
-        .modes { display:flex; align-items: center; gap: 10px; }
-
-        .modebtn {
-            border: 1px solid var(--border);
-            background: var(--card);
-            color: var(--fg);
-            border-radius: 12px;
-            padding: 10px 12px;
-            cursor: pointer;
-            font-weight: 800;
-            line-height: 1;
-        }
-
         /* Hidden but used by JS chart scripts */
         .rangeselect {
             display:none;
@@ -743,14 +765,22 @@ export function landingRouter(pool) {
     <div class="topbar">
         <div>
             <div class="brand">airBuddy | online</div>
-            <p class="sub">The airBuddy project beta server.</p>
+            <p class="sub">Know your air</p>
 
             <p class="links">
                 <a href="/api/live">/api/live</a>
                 <a href="/api/health">/api/health</a>
+                <a href="https://github.com/russs95/airbuddy_v2" target="_blank" rel="noopener">airbuddy_v2</a>
+                <a href="https://github.com/russs95/airbuddy-online" target="_blank" rel="noopener">beta server</a>
             </p>
         </div>
-        <!-- Button is rendered in charts header too; but keeping topbar clean. -->
+
+        <!-- Dark mode toggle: TOP RIGHT -->
+        <div class="modes">
+            <button id="modeToggle" class="modebtn" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+                ◐
+            </button>
+        </div>
     </div>
 
     ${serverTimeLine}
@@ -765,14 +795,20 @@ export function landingRouter(pool) {
         DB stores UTC; page formats times using <b>${esc(tz)}</b> (from users_tb.time_zone).
     </div>
 
-    <!-- Theme toggle -->
-    <script>
+    <!-- Theme toggle (CSP-nonced) -->
+    <script nonce="${esc(nonce)}">
         (function () {
             function applyTheme(t) {
                 document.documentElement.setAttribute("data-theme", t);
             }
+
             const saved = localStorage.getItem("airbuddy_theme");
-            if (saved === "dark" || saved === "light") applyTheme(saved);
+            if (saved === "dark" || saved === "light") {
+                applyTheme(saved);
+            } else {
+                // Optional default
+                applyTheme("light");
+            }
 
             const btn = document.getElementById("modeToggle");
             if (!btn) return;
@@ -786,23 +822,24 @@ export function landingRouter(pool) {
         })();
     </script>
 
-    <!-- Charts -->
+    <!-- Charts (external, CSP-safe) -->
     <script src="/static/chart_core.js"></script>
     <script src="/static/temps.js"></script>
     <script src="/static/humidity.js"></script>
     <script src="/static/co2.js"></script>
     <script src="/static/tvoc.js"></script>
-    <script nonce="${esc(res.locals.cspNonce)}"> ... </script>
-    <!-- Keep hidden selector in sync with GET dropdown -->
-    <script>
+
+    <!-- Keep hidden selector in sync with GET dropdown (CSP-nonced) -->
+    <script nonce="${esc(nonce)}">
         (function () {
             const formSel = document.getElementById("range");
             const chartSel = document.getElementById("range-select");
             if (!formSel || !chartSel) return;
+
             chartSel.value = formSel.value;
+
             formSel.addEventListener("change", function () {
                 chartSel.value = formSel.value;
-                // Let scripts react via change event
                 chartSel.dispatchEvent(new Event("change"));
             });
         })();
