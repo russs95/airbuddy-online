@@ -2,9 +2,6 @@
 (function () {
     "use strict";
 
-    // -------------------------------------------------
-    // Core config
-    // -------------------------------------------------
     const DEFAULT_RANGES_HOURS = {
         "1h": 1,
         "6h": 6,
@@ -14,9 +11,8 @@
         "30d": 24 * 30,
     };
 
-    // -------------------------------------------------
-    // Small helpers
-    // -------------------------------------------------
+    const DISPLAY_TZ = "Asia/Jakarta";
+
     function readJSONAttr(el, name, fallback) {
         const raw = el.getAttribute(name);
         if (!raw) return fallback ?? [];
@@ -68,17 +64,16 @@
 
     function formatTime(tsSec) {
         const d = new Date(tsSec * 1000);
-        return d.toLocaleString(undefined, {
-            hour: "2-digit",
-            minute: "2-digit",
+        return new Intl.DateTimeFormat("en-GB", {
+            timeZone: DISPLAY_TZ,
             day: "2-digit",
             month: "short",
-        });
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+        }).format(d);
     }
 
-    // -------------------------------------------------
-    // Drawing primitives
-    // -------------------------------------------------
     function setupCanvas(canvas) {
         const ctx = canvas.getContext("2d");
         const dpr = window.devicePixelRatio || 1;
@@ -87,7 +82,6 @@
         canvas.width = Math.max(1, Math.floor(rect.width * dpr));
         canvas.height = Math.max(1, Math.floor(rect.height * dpr));
 
-        // Use CSS pixels for drawing
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
         return { ctx, W: rect.width, H: rect.height };
@@ -103,11 +97,6 @@
         ctx.lineTo(x, padT + plotH);
         ctx.stroke();
         ctx.setLineDash([]);
-
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        ctx.font =
-            '11px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-        ctx.fillText("stopped", x + 4, padT + plotH - 6);
         ctx.restore();
     }
 
@@ -157,53 +146,38 @@
         ctx.restore();
     }
 
-    function drawLegend(ctx, padL, padT, plotW, seriesList) {
-        const x = padL + plotW - 8;
-        let y = padT + 6;
-
-        ctx.save();
-        ctx.textAlign = "right";
-        ctx.textBaseline = "top";
-        ctx.font =
-            '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-
-        for (const s of seriesList) {
-            if (!s || !s.name) continue;
-            ctx.fillStyle = s.color || "#000";
-            ctx.fillText(String(s.name), x, y);
-            y += 14;
-        }
-
-        ctx.restore();
-    }
-
-    // -------------------------------------------------
-    // Public API: time-series chart with gaps + markers
-    // -------------------------------------------------
     function drawTimeSeriesChart(opts) {
         const canvas = opts.canvas;
         if (!canvas) return;
 
-        const ctx0 = canvas.getContext("2d");
-        if (!ctx0) return;
-
         const ranges = opts.rangesHours || DEFAULT_RANGES_HOURS;
         const rangeKey = opts.rangeKey || "24h";
         const hours = ranges[rangeKey] || 24;
-
         const maxGapS = Number.isFinite(opts.maxGapS) ? opts.maxGapS : 240;
 
-        const now = opts.nowUnixSec != null ? Math.floor(opts.nowUnixSec) : Math.floor(Date.now() / 1000);
-        const cutoff = now - hours * 3600;
-
-        // Build timeline + series data
         const timestamps = Array.isArray(opts.timestamps) ? opts.timestamps : [];
         const seriesList = Array.isArray(opts.series) ? opts.series : [];
 
-        // Telemetry reading timestamps: any timestamp where ANY series has a value
-        const readingTimes = [];
+        // 🔥 IMPORTANT FIX: compute latest data timestamp
+        let maxDataT = null;
+        for (let t of timestamps) {
+            const v = toFiniteNumber(t);
+            if (v != null && (maxDataT == null || v > maxDataT)) {
+                maxDataT = v;
+            }
+        }
 
-        // Build each series as [{t,v}]
+        if (maxDataT == null) {
+            const { ctx, W, H } = setupCanvas(canvas);
+            ctx.clearRect(0, 0, W, H);
+            ctx.fillStyle = "#666";
+            ctx.fillText("No data", 10, 20);
+            return;
+        }
+
+        const cutoff = maxDataT - hours * 3600;
+
+        const readingTimes = [];
         const builtSeries = seriesList.map((s) => ({
             name: s.name || "",
             color: s.color || "#000",
@@ -214,14 +188,14 @@
 
         for (let i = 0; i < timestamps.length; i++) {
             const t = toFiniteNumber(timestamps[i]);
-            if (t == null) continue;
-            if (t < cutoff || t > now) continue;
+            if (t == null || t < cutoff || t > maxDataT) continue;
 
             let anyVal = false;
 
             for (let si = 0; si < seriesList.length; si++) {
-                const rawArr = seriesList[si]?.values;
-                const arr = Array.isArray(rawArr) ? rawArr : [];
+                const arr = Array.isArray(seriesList[si]?.values)
+                    ? seriesList[si].values
+                    : [];
                 const v = toFiniteNumber(arr[i]);
                 if (v == null) continue;
 
@@ -237,31 +211,29 @@
 
         if (!readingTimes.length) {
             ctx.fillStyle = "#666";
-            ctx.font =
-                '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
             ctx.fillText("No data in range", 10, 20);
             return;
         }
 
-        // Layout
         const padL = 60;
         const padR = 20;
         const padT = 20;
         const padB = 50;
 
-        const plotW = Math.max(1, W - padL - padR);
-        const plotH = Math.max(1, H - padT - padB);
+        const plotW = W - padL - padR;
+        const plotH = H - padT - padB;
 
-        // Scales
         const minT = cutoff;
-        const maxT = now;
-        const xMap = (t) => padL + ((t - minT) / (maxT - minT)) * plotW;
+        const maxT = maxDataT;
 
-        // Y bounds from all series
+        const xMap = (t) =>
+            padL + ((t - minT) / (maxT - minT)) * plotW;
+
         const allVals = [];
         for (const s of builtSeries) {
             for (const d of s.data) allVals.push(d.v);
         }
+
         const minV = allVals.length ? Math.min(...allVals) : 0;
         const maxV = allVals.length ? Math.max(...allVals) : 1;
         const yB = niceBounds(minV, maxV, 5);
@@ -269,9 +241,8 @@
         const yMap = (v) =>
             padT + (1 - (v - yB.min) / (yB.max - yB.min)) * plotH;
 
-        // Grid (horizontal)
+        // Grid
         ctx.strokeStyle = "#eee";
-        ctx.lineWidth = 1;
         ctx.beginPath();
         for (let i = 0; i <= 4; i++) {
             const y = padT + (i / 4) * plotH;
@@ -290,49 +261,62 @@
 
         // Y labels
         ctx.fillStyle = "#666";
-        ctx.font =
-            '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
-        const yFmt = typeof opts.yLabelFmt === "function" ? opts.yLabelFmt : (v) => String(v);
+        const yFmt = typeof opts.yLabelFmt === "function"
+            ? opts.yLabelFmt
+            : (v) => String(v);
+
         for (let i = 0; i <= 4; i++) {
             const v = yB.max - (i / 4) * (yB.max - yB.min);
             const y = padT + (i / 4) * plotH;
             ctx.fillText(String(yFmt(v)), 8, y + 4);
         }
 
-        // Time labels (start/mid/end)
+        // X labels (real data window)
         const midT = Math.floor((minT + maxT) / 2);
         ctx.fillStyle = "#777";
         ctx.fillText(formatTime(minT), padL, padT + plotH + 25);
         ctx.fillText(formatTime(midT), padL + plotW / 2 - 40, padT + plotH + 25);
         ctx.fillText(formatTime(maxT), padL + plotW - 80, padT + plotH + 25);
 
-        // Gap markers based on reading times
-        readingTimes.sort((a, b) => a - b);
-        let prevT = null;
-        for (const t of readingTimes) {
-            if (prevT != null && (t - prevT) > maxGapS) {
-                // marker at gap start (prev)
-                drawGapMarker(ctx, xMap(prevT), padT, plotH);
-            }
-            prevT = t;
-        }
-
-        // Draw each series (sorted by time)
+        // Draw series
         for (const s of builtSeries) {
             s.data.sort((a, b) => a.t - b.t);
             drawSeriesWithGaps(ctx, s.data, xMap, yMap, s.color, s.width, maxGapS);
             drawPoints(ctx, s.data, xMap, yMap, s.color, s.pointRadius);
         }
 
-        // Legend
-        if (opts.showLegend !== false) {
-            drawLegend(ctx, padL, padT, plotW, builtSeries);
-        }
+        // Hover tooltip
+        canvas.onmousemove = function (ev) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = ev.clientX - rect.left;
+
+            let nearest = null;
+            let bestDx = Infinity;
+
+            for (const s of builtSeries) {
+                for (const d of s.data) {
+                    const x = xMap(d.t);
+                    const dx = Math.abs(mouseX - x);
+                    if (dx < bestDx) {
+                        bestDx = dx;
+                        nearest = { time: d.t, value: d.v, name: s.name };
+                    }
+                }
+            }
+
+            if (nearest && bestDx < 10) {
+                canvas.title =
+                    formatTime(nearest.time) +
+                    "\n" +
+                    nearest.name +
+                    ": " +
+                    yFmt(nearest.value);
+            } else {
+                canvas.title = "";
+            }
+        };
     }
 
-    // -------------------------------------------------
-    // Export
-    // -------------------------------------------------
     window.AirBuddyChartCore = {
         DEFAULT_RANGES_HOURS,
         readJSONAttr,
