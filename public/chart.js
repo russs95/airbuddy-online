@@ -15,6 +15,9 @@
     // Break line + show marker if readings are too far apart
     const MAX_GAP_S = 240; // 4 minutes
 
+    // Display timezone for labels/tooltips (match server display)
+    const DISPLAY_TZ = "Asia/Jakarta";
+
     // -------------------------------------------------
     // Helpers
     // -------------------------------------------------
@@ -60,26 +63,39 @@
         };
     }
 
-    function formatTime(ts) {
-        const d = new Date(ts * 1000);
-        return d.toLocaleString(undefined, {
-            hour: "2-digit",
-            minute: "2-digit",
-            day: "2-digit",
-            month: "short",
-        });
-    }
-
     function isFiniteNumber(x) {
         const n = Number(x);
         return Number.isFinite(n) ? n : null;
+    }
+
+    function formatTime(tsSec) {
+        const d = new Date(tsSec * 1000);
+        // Example: Feb 23, 22:19
+        return new Intl.DateTimeFormat("en-GB", {
+            timeZone: DISPLAY_TZ,
+            day: "2-digit",
+            month: "short",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+        }).format(d);
+    }
+
+    // For axis labels, shorter is nicer
+    function formatTimeShort(tsSec) {
+        const d = new Date(tsSec * 1000);
+        return new Intl.DateTimeFormat("en-GB", {
+            timeZone: DISPLAY_TZ,
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+        }).format(d);
     }
 
     // -------------------------------------------------
     // Drawing helpers
     // -------------------------------------------------
     function drawGapMarker(ctx, x, padT, plotH) {
-        // faint vertical marker line
         ctx.save();
         ctx.strokeStyle = "rgba(0,0,0,0.15)";
         ctx.lineWidth = 1;
@@ -90,7 +106,6 @@
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // tiny label near bottom
         ctx.fillStyle = "rgba(0,0,0,0.35)";
         ctx.font = '11px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
         ctx.fillText("stopped", x + 4, padT + plotH - 6);
@@ -98,7 +113,6 @@
     }
 
     function drawSeriesWithGaps(ctx, data, xMap, yMap, color, maxGapS) {
-        // data: [{t, v}] sorted by t asc
         ctx.save();
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
@@ -142,7 +156,6 @@
     }
 
     function drawLegend(ctx, padL, padT, plotW) {
-        // top-right inside plot
         const x = padL + plotW - 8;
         let y = padT + 6;
 
@@ -162,17 +175,68 @@
     }
 
     // -------------------------------------------------
+    // Hover tooltip (via canvas.title)
+    // -------------------------------------------------
+    function attachHoverTitle(canvas, ctx, pickNearestFn) {
+        function onMove(ev) {
+            const rect = canvas.getBoundingClientRect();
+            const x = ev.clientX - rect.left;
+            const y = ev.clientY - rect.top;
+
+            const hit = pickNearestFn(x, y);
+            if (!hit) {
+                // Don’t spam; keep last title if you want.
+                canvas.title = "";
+                return;
+            }
+
+            // Browser tooltip
+            canvas.title = hit;
+        }
+
+        function onLeave() {
+            canvas.title = "";
+        }
+
+        canvas.addEventListener("mousemove", onMove);
+        canvas.addEventListener("mouseleave", onLeave);
+    }
+
+    // -------------------------------------------------
     // Draw Temperature + RTC Temperature Chart
     // -------------------------------------------------
     function drawChart(canvas, timestamps, temps, rtcTemps, rangeKey) {
         const ctx = canvas.getContext("2d");
         const hours = RANGES[rangeKey] || 24;
 
-        const now = Math.floor(Date.now() / 1000);
-        const cutoff = now - hours * 3600;
+        // Build full readings list (all valid timestamps, regardless of values)
+        const allTs = [];
+        for (let i = 0; i < timestamps.length; i++) {
+            const t = isFiniteNumber(timestamps[i]);
+            if (t != null) allTs.push(t);
+        }
 
-        // Build base reading timeline (for gap markers)
-        // Any reading with at least one value counts as "a telemetry reading"
+        // If no timestamps, bail early
+        if (!allTs.length) {
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+            canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+            ctx.clearRect(0, 0, rect.width, rect.height);
+            ctx.fillStyle = "#666";
+            ctx.font = '12px "Mulish", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif';
+            ctx.fillText("No data", 10, 20);
+            return;
+        }
+
+        // IMPORTANT FIX:
+        // Use latest datapoint time as "maxT" instead of browser Date.now()
+        const maxDataT = Math.max(...allTs);
+        const cutoff = maxDataT - hours * 3600;
+
+        // Build series limited to [cutoff, maxDataT]
         const readings = [];
         const tempData = [];
         const rtcData = [];
@@ -180,7 +244,7 @@
         for (let i = 0; i < timestamps.length; i++) {
             const t = isFiniteNumber(timestamps[i]);
             if (t == null) continue;
-            if (t < cutoff || t > now) continue;
+            if (t < cutoff || t > maxDataT) continue;
 
             const tv = isFiniteNumber(temps[i]);
             const rv = isFiniteNumber(rtcTemps[i]);
@@ -188,10 +252,10 @@
             if (tv != null) tempData.push({ t, v: tv });
             if (rv != null) rtcData.push({ t, v: rv });
 
-            if (tv != null || rv != null) readings.push({ t });
+            if (tv != null || rv != null) readings.push({ t, tv, rv });
         }
 
-        // Setup canvas scaling (always)
+        // Setup canvas scaling
         const dpr = window.devicePixelRatio || 1;
         const rect = canvas.getBoundingClientRect();
         canvas.width = Math.max(1, Math.floor(rect.width * dpr));
@@ -219,13 +283,13 @@
         const plotW = W - padL - padR;
         const plotH = H - padT - padB;
 
-        // X scale is time
+        // X scale is time, aligned to actual data window
         const minT = cutoff;
-        const maxT = now;
+        const maxT = maxDataT;
 
         const xMap = (t) => padL + ((t - minT) / (maxT - minT)) * plotW;
 
-        // Y bounds computed across BOTH series values (so they share axis)
+        // Y bounds across BOTH series values
         const allVals = [];
         for (const d of tempData) allVals.push(d.v);
         for (const d of rtcData) allVals.push(d.v);
@@ -237,7 +301,7 @@
         const yMap = (v) =>
             padT + (1 - (v - yBounds.min) / (yBounds.max - yBounds.min)) * plotH;
 
-        // Grid
+        // Grid (horizontal)
         ctx.strokeStyle = "#eee";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -265,38 +329,62 @@
             ctx.fillText(v.toFixed(1) + "°C", 8, y + 4);
         }
 
-        // Time labels (start/mid/end)
+        // Time labels (start/mid/end) — based on actual data window
         const mid = Math.floor((minT + maxT) / 2);
         ctx.fillStyle = "#777";
         ctx.fillText(formatTime(minT), padL, padT + plotH + 25);
         ctx.fillText(formatTime(mid), padL + plotW / 2 - 40, padT + plotH + 25);
         ctx.fillText(formatTime(maxT), padL + plotW - 80, padT + plotH + 25);
 
-        // Gap markers: based on actual telemetry reading timestamps
+        // Gap markers: based on actual telemetry timestamps
         readings.sort((a, b) => a.t - b.t);
         let prevT = null;
         for (const r of readings) {
             if (prevT != null && (r.t - prevT) > MAX_GAP_S) {
-                // Marker at the GAP START (the last known good reading time)
                 const x = xMap(prevT);
                 drawGapMarker(ctx, x, padT, plotH);
             }
             prevT = r.t;
         }
 
-        // Lines (break on gaps) + points
-        // Temp
+        // Lines + points
         tempData.sort((a, b) => a.t - b.t);
         drawSeriesWithGaps(ctx, tempData, xMap, yMap, "#c62828", MAX_GAP_S);
         drawPoints(ctx, tempData, xMap, yMap, "#c62828");
 
-        // RTC Temp
         rtcData.sort((a, b) => a.t - b.t);
         drawSeriesWithGaps(ctx, rtcData, xMap, yMap, "#2e7d32", MAX_GAP_S);
         drawPoints(ctx, rtcData, xMap, yMap, "#2e7d32");
 
         // Legend
         drawLegend(ctx, padL, padT, plotW);
+
+        // Hover tooltip via canvas.title (nearest timestamp)
+        // We pick nearest point by X distance.
+        attachHoverTitle(canvas, ctx, function (mouseX, mouseY) {
+            // Find nearest reading by time (X proximity)
+            let best = null;
+            let bestDx = Infinity;
+
+            for (const r of readings) {
+                const x = xMap(r.t);
+                const dx = Math.abs(mouseX - x);
+                if (dx < bestDx) {
+                    bestDx = dx;
+                    best = r;
+                }
+            }
+
+            // Only show tooltip when you're "close enough" horizontally
+            // (~10px is a decent feel)
+            if (!best || bestDx > 10) return null;
+
+            const tLabel = formatTime(best.t);
+            const tv = best.tv != null ? best.tv.toFixed(1) + "°C" : "—";
+            const rv = best.rv != null ? best.rv.toFixed(1) + "°C" : "—";
+
+            return `${tLabel}\nTemp: ${tv}\nRTC: ${rv}`;
+        });
     }
 
     // -------------------------------------------------
