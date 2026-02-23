@@ -194,14 +194,11 @@ export function landingRouter(pool) {
     router.get("/", async (req, res) => {
         try {
             // Ensure we have a CSP nonce for inline scripts (theme + range-sync)
-            // If server.js already sets res.locals.cspNonce, we reuse it.
             const nonce = res.locals?.cspNonce || makeNonce();
             if (!res.locals) res.locals = {};
             res.locals.cspNonce = nonce;
 
-            // If upstream CSP is missing/doesn't include nonce, set a page CSP here.
-            // This avoids the "blocked inline script" issue and keeps everything CSP-safe.
-            // (If you already set CSP with helmet + nonce, this will simply overwrite it for this response.)
+            // Set a page CSP here (matches server.js approach with nonce)
             res.setHeader(
                 "Content-Security-Policy",
                 [
@@ -218,29 +215,31 @@ export function landingRouter(pool) {
             );
 
             // Current assumption for now:
-            // - buwana_id=1 owns the viewing session
-            // - device_id=1 is the primary device
             const buwanaId = 1;
             const deviceId = 1;
 
             const rangeKey = pickRangeKey(req.query.range);
             const hours = RANGE_HOURS[rangeKey] || 24;
 
-            // ✅ User timezone lookup happens here (render-time)
+            // ✅ User timezone lookup (for RECEIVED display)
             const userTz = await fetchUserTimeZone(pool, buwanaId);
-            const { tz, fmtLong } = makeFormatters(userTz);
+
+            // Two formatters:
+            // - user timezone for "received_at" + UI
+            // - UTC for "recorded_at" (device time, per your design)
+            const { tz: tzUser, fmtLong: fmtUserLong } = makeFormatters(userTz);
+            const { tz: tzUtc, fmtLong: fmtUtcLong } = makeFormatters("UTC");
 
             const device = await fetchDeviceInfo(pool, deviceId);
 
             // ------------------------
             // Telemetry:
-            //  - chartRows: "enough" points (cap + time cutoff)
-            //  - latestRows: always last 10 (for the list under the charts)
+            // We drive charts + recency by RECEIVED time (server truth).
+            // This avoids wrong-device-clock making charts useless.
             // ------------------------
             const nowUnix = Math.floor(Date.now() / 1000);
             const cutoffUnix = nowUnix - hours * 3600;
 
-            // cap so we never ship a massive payload (tweak if needed)
             const MAX_POINTS = 5000;
 
             const [chartRows] = await pool.query(
@@ -253,9 +252,9 @@ export function landingRouter(pool) {
                         values_json
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
-                      AND recorded_at >= FROM_UNIXTIME(?)
-                    ORDER BY recorded_at ASC
-                        LIMIT ?
+                      AND received_at >= FROM_UNIXTIME(?)
+                    ORDER BY received_at ASC
+                    LIMIT ?
                 `,
                 [deviceId, cutoffUnix, MAX_POINTS]
             );
@@ -270,8 +269,8 @@ export function landingRouter(pool) {
                         values_json
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
-                    ORDER BY recorded_at DESC
-                        LIMIT 10
+                    ORDER BY received_at DESC
+                    LIMIT 10
                 `,
                 [deviceId]
             );
@@ -288,7 +287,7 @@ export function landingRouter(pool) {
             }
 
             // ------------------------
-            // Build chart arrays (from chartRows, already chronological)
+            // Build chart arrays (timestamps from RECEIVED time)
             // ------------------------
             const timestamps = [];
             const temps = [];
@@ -298,13 +297,13 @@ export function landingRouter(pool) {
             const tvocs = [];
 
             for (const r of chartRows || []) {
-                const ts = toUnixSeconds(r?.recorded_at);
+                // ✅ Use received_at for chart X-axis
+                const ts = toUnixSeconds(r?.received_at);
                 if (ts == null) continue;
 
                 const obj = safeJsonParse(r.values_json);
                 const core = pickCore(obj);
 
-                // Keep arrays aligned by index (timestamps always present)
                 timestamps.push(ts);
                 temps.push(core.temp_c);
                 rtcTemps.push(core.rtc_temp_c);
@@ -320,7 +319,7 @@ export function landingRouter(pool) {
             // ------------------------
             const serverTimeLine = `
                 <div class="servertime">
-                    <b>Server time (${esc(tz)}):</b> ${esc(fmtLong(now))}
+                    <b>Server time (${esc(tzUser)}):</b> ${esc(fmtUserLong(now))}
                 </div>
             `;
 
@@ -330,8 +329,8 @@ export function landingRouter(pool) {
             const fw = device?.firmware_version ?? "—";
             const dtype = device?.device_type ?? "—";
             const status = device?.status ?? "—";
-            const lastSeen = device?.last_seen_at ? fmtLong(device.last_seen_at) : "—";
-            const createdAt = device?.created_at ? fmtLong(device.created_at) : "—";
+            const lastSeen = device?.last_seen_at ? fmtUserLong(device.last_seen_at) : "—";
+            const createdAt = device?.created_at ? fmtUserLong(device.created_at) : "—";
             const uid = device?.device_uid ?? "—";
             const claimed = device?.claimed_full_name ?? "—";
 
@@ -366,7 +365,7 @@ export function landingRouter(pool) {
                                 <tr><th>last_seen_at</th><td>${esc(lastSeen)}</td></tr>
                                 <tr><th>created_at</th><td>${esc(createdAt)}</td></tr>
                                 <tr><th>claimed_by</th><td>${esc(claimed)}</td></tr>
-                                <tr><th>last telemetry received</th><td>${esc(lastReceivedAt ? fmtLong(lastReceivedAt) : "—")}</td></tr>
+                                <tr><th>last telemetry received</th><td>${esc(lastReceivedAt ? fmtUserLong(lastReceivedAt) : "—")}</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -393,8 +392,6 @@ export function landingRouter(pool) {
 
             // ------------------------
             // Charts
-            // Each canvas carries only what it needs.
-            // (shared range selector is #range-select below)
             // ------------------------
             const commonDataAttrs = `
                 data-timestamps='${esc(JSON.stringify(timestamps))}'
@@ -472,13 +469,17 @@ export function landingRouter(pool) {
 
                     const rightLabel = `${deviceName} - ${r.device_id} | ${r.telemetry_id}`;
 
+                    // ✅ recorded_at is UTC (device time), received_at is user tz (server truth)
+                    const recordedUtc = r.recorded_at ? fmtUtcLong(r.recorded_at) : "—";
+                    const receivedUser = r.received_at ? fmtUserLong(r.received_at) : "—";
+
                     return `
                         <div class="entry">
                             <div class="entry-head">
                                 <div>
-                                    <b>recorded:</b> ${esc(r.recorded_at ? fmtLong(r.recorded_at) : "—")}
+                                    <b>recorded (UTC):</b> ${esc(recordedUtc)}
                                     <span class="dot">•</span>
-                                    <b>received:</b> ${esc(r.received_at ? fmtLong(r.received_at) : "—")}
+                                    <b>received (${esc(tzUser)}):</b> ${esc(receivedUser)}
                                 </div>
                                 <div class="muted">${esc(rightLabel)}</div>
                             </div>
@@ -687,10 +688,7 @@ export function landingRouter(pool) {
             color: var(--fg);
         }
 
-        /* Hidden but used by JS chart scripts */
-        .rangeselect {
-            display:none;
-        }
+        .rangeselect { display:none; }
 
         .chartwrap {
             border: 1px solid var(--border);
@@ -775,7 +773,6 @@ export function landingRouter(pool) {
             </p>
         </div>
 
-        <!-- Dark mode toggle: TOP RIGHT -->
         <div class="modes">
             <button id="modeToggle" class="modebtn" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
                 ◐
@@ -792,10 +789,10 @@ export function landingRouter(pool) {
     ${latestRows && latestRows.length ? latestEntriesHtml : `<p class="muted">No telemetry readings yet.</p>`}
 
     <div class="footerline">
-        DB stores UTC; page formats times using <b>${esc(tz)}</b> (from users_tb.time_zone).
+        Charts use <b>received_at</b> for X-axis (server truth, shown in <b>${esc(tzUser)}</b>).<br/>
+        The <b>recorded_at</b> field is displayed as <b>UTC</b> (device time).
     </div>
 
-    <!-- Theme toggle (CSP-nonced) -->
     <script nonce="${esc(nonce)}">
         (function () {
             function applyTheme(t) {
@@ -806,7 +803,6 @@ export function landingRouter(pool) {
             if (saved === "dark" || saved === "light") {
                 applyTheme(saved);
             } else {
-                // Optional default
                 applyTheme("light");
             }
 
@@ -822,14 +818,12 @@ export function landingRouter(pool) {
         })();
     </script>
 
-    <!-- Charts (external, CSP-safe) -->
     <script src="/static/chart_core.js"></script>
     <script src="/static/temps.js"></script>
     <script src="/static/humidity.js"></script>
     <script src="/static/co2.js"></script>
     <script src="/static/tvoc.js"></script>
 
-    <!-- Keep hidden selector in sync with GET dropdown (CSP-nonced) -->
     <script nonce="${esc(nonce)}">
         (function () {
             const formSel = document.getElementById("range");
