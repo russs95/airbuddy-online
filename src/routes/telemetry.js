@@ -122,7 +122,7 @@ export function telemetryRouter(pool) {
                 `
             SELECT
                 UNIX_TIMESTAMP(recorded_at) AS ts,
-                JSON_EXTRACT(values_json, '$.eco2_ppm') AS eco2,
+                CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE) AS eco2,
                 JSON_EXTRACT(values_json, '$.temp_c') AS temp,
                 JSON_EXTRACT(values_json, '$.rtc_temp_c') AS rtc_temp,
                 JSON_EXTRACT(values_json, '$.rh_pct') AS rh,
