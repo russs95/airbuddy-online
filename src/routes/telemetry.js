@@ -113,5 +113,59 @@ export function telemetryRouter(pool) {
         }
     });
 
+    router.get("/v1/trends", async (req, res) => {
+        const deviceId = req.device.device_id;
+        const hours = Math.max(1, Math.min(168, Number(req.query.hours) || 24));
+
+        try {
+            const [rows] = await pool.query(
+                `
+            SELECT
+                UNIX_TIMESTAMP(recorded_at) AS ts,
+                JSON_EXTRACT(values_json, '$.eco2_ppm') AS eco2,
+                JSON_EXTRACT(values_json, '$.temp_c') AS temp,
+                JSON_EXTRACT(values_json, '$.rtc_temp_c') AS rtc_temp,
+                JSON_EXTRACT(values_json, '$.rh_pct') AS rh,
+                JSON_EXTRACT(values_json, '$.tvoc_ppb') AS tvoc
+            FROM telemetry_readings_tb
+            WHERE device_id = ?
+              AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
+            ORDER BY recorded_at ASC
+            `,
+                [deviceId, hours]
+            );
+
+            const timestamps = [];
+            const eco2s = [];
+            const temps = [];
+            const rtcTemps = [];
+            const rhs = [];
+            const tvocs = [];
+
+            for (const r of rows) {
+                timestamps.push(r.ts);
+                eco2s.push(r.eco2 == null ? null : Number(r.eco2));
+                temps.push(r.temp == null ? null : Number(r.temp));
+                rtcTemps.push(r.rtc_temp == null ? null : Number(r.rtc_temp));
+                rhs.push(r.rh == null ? null : Number(r.rh));
+                tvocs.push(r.tvoc == null ? null : Number(r.tvoc));
+            }
+
+            res.json({
+                ok: true,
+                timestamps,
+                eco2s,
+                temps,
+                rtcTemps,
+                rhs,
+                tvocs,
+            });
+
+        } catch (e) {
+            console.error("trends error:", e);
+            res.status(500).json({ ok: false });
+        }
+    });
+
     return router;
 }
