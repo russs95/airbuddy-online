@@ -1,4 +1,24 @@
 // src/server.js
+
+import mysql from "mysql2"; // add at top
+
+const MySQLStore = MySQLStoreFactory(session);
+
+const sessionStore = new MySQLStore(
+    {
+        createDatabaseTable: true,
+        expiration: 1000 * 60 * 60 * 24 * 14,
+        checkExpirationInterval: 1000 * 60 * 60,
+    },
+    mysql.createPool({
+        host: process.env.DB_HOST,
+        port: Number(process.env.DB_PORT || 3306),
+        user: process.env.DB_USER,
+        password: process.env.DB_PASS,
+        database: process.env.DB_NAME,
+    })
+);
+
 import express from "express";
 import dotenv from "dotenv";
 import helmet from "helmet";
