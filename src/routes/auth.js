@@ -3,24 +3,30 @@ import express from "express";
 import crypto from "crypto";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 
-// Buwana config (from your message)
 const BUWANA_CLIENT_ID = process.env.BUWANA_CLIENT_ID || "airb_ca090536efc8";
-const BUWANA_AUTHORIZE_URL = process.env.BUWANA_AUTHORIZE_URL || "https://buwana.ecobricks.org/authorize.php";
-const BUWANA_TOKEN_URL = process.env.BUWANA_TOKEN_URL || "https://buwana.ecobricks.org/token.php";
-const BUWANA_JWKS_URI = process.env.BUWANA_JWKS_URI || "https://buwana.ecobricks.org/.well-known/jwks.php";
+const BUWANA_CLIENT_SECRET = process.env.BUWANA_CLIENT_SECRET || ""; // optional (some servers require it)
+
+const BUWANA_AUTHORIZE_URL =
+    process.env.BUWANA_AUTHORIZE_URL || "https://buwana.ecobricks.org/authorize.php";
+const BUWANA_TOKEN_URL =
+    process.env.BUWANA_TOKEN_URL || "https://buwana.ecobricks.org/token.php";
+const BUWANA_JWKS_URI =
+    process.env.BUWANA_JWKS_URI || "https://buwana.ecobricks.org/.well-known/jwks.php";
+
 const BUWANA_REDIRECT_URI =
     process.env.BUWANA_REDIRECT_URI || "https://air2.earthen.io/api/auth/callback";
 
-// Scope: keep minimal unless you know extra Buwana scopes you want
 const BUWANA_SCOPE = process.env.BUWANA_SCOPE || "openid profile email";
 
-// Optional: issuer check. If you know Buwana’s `iss` claim value, set it.
-// Example: BUWANA_ISSUER="https://buwana.ecobricks.org/"
+// If you know exact issuer string, set it. Otherwise leave blank to skip issuer check.
 const BUWANA_ISSUER = process.env.BUWANA_ISSUER || "";
 
 // Where to send the user after login
 const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://air2.earthen.io/";
 
+// ------------------------
+// Small helpers
+// ------------------------
 function b64url(buf) {
     return Buffer.from(buf)
         .toString("base64")
@@ -38,15 +44,6 @@ function randomString(lenBytes = 32) {
     return b64url(crypto.randomBytes(lenBytes));
 }
 
-function parseBuwanaId(sub) {
-    // Accept numeric sub, or strings that contain a numeric id
-    if (sub == null) return null;
-    const s = String(sub);
-    if (/^\d+$/.test(s)) return Number(s);
-    const m = s.match(/(\d+)/);
-    return m ? Number(m[1]) : null;
-}
-
 async function exchangeCodeForTokens({ code, codeVerifier }) {
     const body = new URLSearchParams();
     body.set("grant_type", "authorization_code");
@@ -55,25 +52,38 @@ async function exchangeCodeForTokens({ code, codeVerifier }) {
     body.set("code", code);
     body.set("code_verifier", codeVerifier);
 
+    // Some OAuth servers require client_secret even with PKCE.
+    if (BUWANA_CLIENT_SECRET) {
+        body.set("client_secret", BUWANA_CLIENT_SECRET);
+    }
+
     const r = await fetch(BUWANA_TOKEN_URL, {
         method: "POST",
         headers: {
             "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
+            Accept: "application/json",
         },
         body: body.toString(),
     });
 
     const text = await r.text();
+
     let json;
     try {
         json = JSON.parse(text);
     } catch {
-        throw new Error(`Token endpoint did not return JSON. status=${r.status} body=${text.slice(0, 200)}`);
+        throw new Error(
+            `Token endpoint did not return JSON. token_url=${BUWANA_TOKEN_URL} status=${r.status} body=${text.slice(
+                0,
+                200
+            )}`
+        );
     }
 
     if (!r.ok) {
-        throw new Error(`Token exchange failed. status=${r.status} body=${text.slice(0, 300)}`);
+        throw new Error(
+            `Token exchange failed. token_url=${BUWANA_TOKEN_URL} status=${r.status} body=${text.slice(0, 400)}`
+        );
     }
 
     return json;
@@ -81,15 +91,16 @@ async function exchangeCodeForTokens({ code, codeVerifier }) {
 
 async function verifyIdToken(idToken) {
     const jwks = createRemoteJWKSet(new URL(BUWANA_JWKS_URI));
-    const opts = {
-        audience: BUWANA_CLIENT_ID,
-    };
+    const opts = { audience: BUWANA_CLIENT_ID };
     if (BUWANA_ISSUER) opts.issuer = BUWANA_ISSUER;
 
     const { payload } = await jwtVerify(idToken, jwks, opts);
     return payload;
 }
 
+// ------------------------
+// Router
+// ------------------------
 export function authRouter(pool) {
     const router = express.Router();
 
@@ -100,7 +111,6 @@ export function authRouter(pool) {
         const state = randomString(24);
         const nonce = randomString(24);
 
-        // Store transient secrets in session
         req.session.buwana = {
             codeVerifier,
             state,
@@ -118,7 +128,7 @@ export function authRouter(pool) {
         url.searchParams.set("code_challenge", codeChallenge);
         url.searchParams.set("code_challenge_method", "S256");
 
-        res.redirect(url.toString());
+        return res.redirect(url.toString());
     });
 
     // Handle callback
@@ -130,7 +140,7 @@ export function authRouter(pool) {
                 return res
                     .status(400)
                     .type("text")
-                    .send(`buwana_error: ${error} ${error_description ? `(${error_description})` : ""}`);
+                    .send(`buwana_error: ${error}${error_description ? ` (${error_description})` : ""}`);
             }
 
             if (!code || !state) {
@@ -138,7 +148,7 @@ export function authRouter(pool) {
             }
 
             const sess = req.session.buwana;
-            if (!sess || !sess.codeVerifier || !sess.state) {
+            if (!sess?.codeVerifier || !sess?.state) {
                 return res.status(400).type("text").send("missing_session_state");
             }
 
@@ -146,62 +156,71 @@ export function authRouter(pool) {
                 return res.status(400).type("text").send("state_mismatch");
             }
 
-            // Exchange code for tokens (PKCE)
+            // Exchange code for tokens
             const tokenJson = await exchangeCodeForTokens({
                 code: String(code),
                 codeVerifier: sess.codeVerifier,
             });
 
             const idToken = tokenJson.id_token;
-            if (!idToken) {
-                return res.status(400).type("text").send("missing_id_token");
-            }
+            if (!idToken) return res.status(400).type("text").send("missing_id_token");
 
-            // Verify JWT against JWKS (audience = client_id)
+            // Verify the ID token
             const claims = await verifyIdToken(idToken);
 
-            // Optional nonce check (if token includes nonce)
+            // Nonce check (only if token includes nonce)
             if (claims.nonce && sess.nonce && String(claims.nonce) !== String(sess.nonce)) {
                 return res.status(400).type("text").send("nonce_mismatch");
             }
 
-            const buwanaId = parseBuwanaId(claims.sub);
-            if (!buwanaId) {
-                return res.status(400).type("text").send("invalid_sub_no_buwana_id");
-            }
-
+            // ✅ IMPORTANT:
+            // In your system:
+            // - sub = open_id (string)  -> store as buwana_sub
+            // - buwana_id = numeric     -> store if present
             const user = {
-                buwana_id: buwanaId,
+                buwana_sub: claims.sub ? String(claims.sub) : null,
+                buwana_id: claims.buwana_id != null ? Number(claims.buwana_id) : null,
                 email: claims.email || null,
                 full_name: claims.name || claims.full_name || null,
-                given_name: claims.given_name || null,
-                family_name: claims.family_name || null,
+                first_name: claims.given_name || claims.first_name || null,
+                last_name: claims.family_name || claims.last_name || null,
                 picture: claims.picture || null,
-                // keep tokenJson off-session unless you explicitly need it
             };
 
-            // Save user into session
-            req.session.user = user;
+            if (!user.buwana_sub) {
+                return res.status(400).type("text").send("missing_sub");
+            }
 
-            // Clear transient PKCE data
+            // Save to session
+            req.session.user = user;
             delete req.session.buwana;
 
-            // Optional: upsert into users_tb if it exists.
-            // If you haven't created users_tb yet, this will fail and we ignore it.
+            // Optional DB upsert (adapt columns to your AB_db schema)
+            // Your AB_db users_tb: user_id PK, buwana_sub UNIQUE, buwana_id optional, email, first_name, last_name, full_name, created_at.
             try {
                 await pool.query(
                     `
-          INSERT INTO users_tb (buwana_id, email, full_name, created_at, updated_at)
-          VALUES (?, ?, ?, NOW(), NOW())
-          ON DUPLICATE KEY UPDATE
-            email = VALUES(email),
-            full_name = VALUES(full_name),
-            updated_at = NOW()
-          `,
-                    [user.buwana_id, user.email, user.full_name]
+                        INSERT INTO users_tb (buwana_sub, buwana_id, email, first_name, last_name, full_name)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                            ON DUPLICATE KEY UPDATE
+                                                 buwana_id = VALUES(buwana_id),
+                                                 email = VALUES(email),
+                                                 first_name = VALUES(first_name),
+                                                 last_name = VALUES(last_name),
+                                                 full_name = VALUES(full_name)
+                    `,
+                    [
+                        user.buwana_sub,
+                        user.buwana_id,
+                        user.email,
+                        user.first_name || "",
+                        user.last_name,
+                        user.full_name || "",
+                    ]
                 );
-            } catch {
-                // ignore for now — we can add users_tb properly when you’re ready
+            } catch (e) {
+                // log but do not fail login
+                console.error("[auth] users_tb upsert failed:", e?.code || e?.message || e);
             }
 
             return res.redirect(POST_LOGIN_REDIRECT);
@@ -211,8 +230,17 @@ export function authRouter(pool) {
         }
     });
 
-    // Who am I?
+    // Who am I? (canonical)
     router.get("/me", (req, res) => {
+        const u = req.session?.user;
+        if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
+        return res.json({ ok: true, user: u });
+    });
+
+    // ✅ Alias so your frontend can just call /api/me
+    // (mounting detail: server.js mounts this router at /api/auth,
+    // but we also want /api/me globally, so we expose it here for server.js to mount too if desired)
+    router.get("/__me_alias", (req, res) => {
         const u = req.session?.user;
         if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
         return res.json({ ok: true, user: u });
