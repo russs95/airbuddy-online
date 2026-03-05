@@ -189,6 +189,16 @@ app.use("/api/auth", authRouter(pool));
 // ------------------------
 app.use("/", landingRouter(pool));
 
+
+// Convenience: allow frontend to call /api/me (session user)
+app.get("/api/me", (req, res) => {
+    const u = req.session?.user;
+    if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
+    return res.json({ ok: true, user: u });
+});
+
+
+
 // ------------------------
 // System routes (public health/live/etc)
 // ------------------------
