@@ -7,7 +7,7 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 const BUWANA_CLIENT_ID = process.env.BUWANA_CLIENT_ID || "airb_ca090536efc8";
 const BUWANA_AUTHORIZE_URL = process.env.BUWANA_AUTHORIZE_URL || "https://buwana.ecobricks.org/authorize.php";
 const BUWANA_TOKEN_URL = process.env.BUWANA_TOKEN_URL || "https://buwana.ecobricks.org/token.php";
-const BUWANA_JWKS_URI = process.env.BUWANA_JWKS_URI || "https://buwana.ecobricks.org/well-known/jwks.php";
+const BUWANA_JWKS_URI = process.env.BUWANA_JWKS_URI || "https://buwana.ecobricks.org/.well-known/jwks.php";
 const BUWANA_REDIRECT_URI =
     process.env.BUWANA_REDIRECT_URI || "https://air2.earthen.io/api/auth/callback";
 
