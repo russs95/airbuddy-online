@@ -14,9 +14,12 @@ import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
 import { requireUser } from "./middleware/requireUser.js";
 
+// v1 (device) routes
 import { telemetryRouter } from "./routes/v1/telemetry.js";
 import { deviceRouter } from "./routes/v1/device.js";
-import { systemRouter } from "./routes/v1/system.js";
+
+// system + user routes (NOT v1)
+import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 
@@ -67,7 +70,7 @@ try {
 }
 
 // ------------------------
-// Buwana sync route
+// Buwana sync route (PUBLIC, secret-protected inside router)
 // ------------------------
 app.use("/api/buwana", makeBuwanaRouter({ pool }));
 
@@ -106,23 +109,12 @@ async function initDbSession() {
         await pool.query(`SET time_zone = ?`, [MYSQL_SESSION_TZ]);
         await pool.query(`SET NAMES utf8mb4`);
 
-        const [rows] = await pool.query(
-            `SELECT @@session.time_zone AS tz, NOW() AS now_session`
-        );
-
+        const [rows] = await pool.query(`SELECT @@session.time_zone AS tz, NOW() AS now_session`);
         const info = rows && rows[0] ? rows[0] : null;
 
-        console.log(
-            "[DB] session time_zone:",
-            info?.tz,
-            "NOW():",
-            info?.now_session
-        );
+        console.log("[DB] session time_zone:", info?.tz, "NOW():", info?.now_session);
     } catch (e) {
-        console.error(
-            "[DB] Failed to set session time_zone / charset:",
-            e?.code || e?.message || e
-        );
+        console.error("[DB] Failed to set session time_zone / charset:", e?.code || e?.message || e);
     }
 }
 
@@ -134,7 +126,7 @@ if (!process.env.SESSION_SECRET) {
     process.exit(1);
 }
 
-// express-mysql-session expects mysql2 (not promise)
+// express-mysql-session expects mysql2 (callback API), not mysql2/promise
 const sessionDbPool = mysql.createPool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT || 3306),
@@ -164,7 +156,7 @@ app.use(
         saveUninitialized: false,
         cookie: {
             httpOnly: true,
-            secure: true,
+            secure: true, // TLS at nginx
             sameSite: "lax",
             domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
             maxAge: 1000 * 60 * 60 * 24 * 14,
@@ -198,20 +190,21 @@ app.use("/api/auth", authRouter(pool));
 app.use("/", landingRouter(pool));
 
 // ------------------------
-// System routes
+// System routes (public health/live/etc)
 // ------------------------
 app.use("/api", systemRouter(pool, startedAt));
 
 // ------------------------
-// Device API (device authenticated)
-// ------------------------
-app.use("/api", deviceAuth(pool), telemetryRouter(pool));
-app.use("/api", deviceAuth(pool), deviceRouter(pool));
-
-// ------------------------
 // Dashboard API (user authenticated)
+// (this is where /api/me should live)
 // ------------------------
 app.use("/api", requireUser, dashboardRouter(pool));
+
+// ------------------------
+// Device API (device authenticated) — v1 namespace
+// ------------------------
+app.use("/api/v1", deviceAuth(pool), telemetryRouter(pool));
+app.use("/api/v1", deviceAuth(pool), deviceRouter(pool));
 
 // ------------------------
 // Global error handler
