@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import mysql from "mysql2/promise";
 
 import { deviceAuth } from "./middleware/deviceAuth.js";
-import telemetryRouter from "./routes/telemetry.js";
+import { telemetryRouter } from "./routes/telemetry.js";
 import makeBuwanaRouter from "./routes/buwana.js";
 
 dotenv.config();
