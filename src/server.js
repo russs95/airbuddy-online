@@ -14,9 +14,9 @@ import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
 import { requireUser } from "./middleware/requireUser.js";
 
-import { telemetryRouter } from "./routes/telemetry.js";
-import { deviceRouter } from "./routes/device.js";
-import { systemRouter } from "./routes/system.js";
+import { telemetryRouter } from "./routes/v1/telemetry.js";
+import { deviceRouter } from "./routes/v1/device.js";
+import { systemRouter } from "./routes/v1/system.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 
