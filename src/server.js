@@ -123,8 +123,7 @@ const sessionDbPool = mysql.createPool({
     connectionLimit: 10,
 });
 
-// This is the ONLY MySQLStore declaration in the file
-const MySQLStore = MySQLStoreFactory(session);
+
 
 const sessionStore = new MySQLStore(
     {
