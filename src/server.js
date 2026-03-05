@@ -6,11 +6,15 @@ import morgan from "morgan";
 import path from "path";
 import { fileURLToPath } from "url";
 
+import session from "express-session";
+import MySQLStoreFactory from "express-mysql-session";
+
 import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
 import { telemetryRouter } from "./routes/telemetry.js";
 import { deviceRouter } from "./routes/device.js";
 import { systemRouter } from "./routes/system.js";
+import { authRouter } from "./routes/auth.js";
 import { landingRouter } from "./pages/landing.js";
 
 dotenv.config();
@@ -18,21 +22,10 @@ dotenv.config();
 // -------------------------------------------------------------------
 // TIMEZONE FOUNDATIONS
 // -------------------------------------------------------------------
-// 1) Node process timezone (affects Date stringification + some libs).
-//    Your UI can still explicitly format "Asia/Jakarta" where desired.
-//    Setting this helps prevent "mystery local time" surprises.
 process.env.TZ = process.env.TZ || "Asia/Jakarta";
-
-// 2) MySQL session timezone: we want all DB-side "NOW()", "CURRENT_TIMESTAMP",
-//    comparisons, and TIMESTAMP conversions to be consistent.
-//    Because you store device "recorded_at" as UTC (per your design), it’s
-//    safest to keep DB session in UTC.
 const MYSQL_SESSION_TZ = "+00:00";
 
 const app = express();
-
-// If you're behind nginx (you are), this fixes req.ip, req.protocol,
-// and helps cookie secure logic if you ever add sessions.
 app.set("trust proxy", true);
 
 // ------------------------
@@ -41,20 +34,15 @@ app.set("trust proxy", true);
 process.on("unhandledRejection", (e) => {
     console.error("UNHANDLED REJECTION:", e && (e.stack || e));
 });
-
 process.on("uncaughtException", (e) => {
     console.error("UNCAUGHT EXCEPTION:", e && (e.stack || e));
 });
 
 // ------------------------
 // Security headers (CSP + fonts)
-// NOTE: landing.js uses ONE tiny inline <script> for theme + selector sync.
-// We allow it safely with a per-request nonce.
 // ------------------------
 app.use((req, res, next) => {
-    res.locals.cspNonce = Buffer.from(`${Date.now()}-${Math.random()}`).toString(
-        "base64"
-    );
+    res.locals.cspNonce = Buffer.from(`${Date.now()}-${Math.random()}`).toString("base64");
     next();
 });
 
@@ -64,11 +52,7 @@ app.use(
             directives: {
                 defaultSrc: ["'self'"],
                 scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.cspNonce}'`],
-                styleSrc: [
-                    "'self'",
-                    "'unsafe-inline'",
-                    "https://fonts.googleapis.com",
-                ],
+                styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
                 fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
                 imgSrc: ["'self'", "data:"],
                 connectSrc: ["'self'"],
@@ -86,6 +70,7 @@ app.use(
 // ------------------------
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "256kb" }));
+app.use(express.urlencoded({ extended: false })); // for form-encoded token exchanges if needed
 
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
@@ -104,24 +89,54 @@ try {
 // Ensure MySQL session timezone is UTC (and charset predictable).
 async function initDbSession() {
     try {
-        // Apply to the current pool session(s). mysql2 pool sessions are created lazily,
-        // but this still helps; and we also issue it once on startup for early connections.
         await pool.query(`SET time_zone = ?`, [MYSQL_SESSION_TZ]);
         await pool.query(`SET NAMES utf8mb4`);
-        // Optional: verify
-        const [rows] = await pool.query(
-            `SELECT @@session.time_zone AS tz, NOW() AS now_session`
-        );
+        const [rows] = await pool.query(`SELECT @@session.time_zone AS tz, NOW() AS now_session`);
         const info = rows && rows[0] ? rows[0] : null;
         console.log("[DB] session time_zone:", info?.tz, "NOW():", info?.now_session);
     } catch (e) {
-        // Don’t hard-fail the server for this, but do log loudly.
-        console.error(
-            "[DB] Failed to set session time_zone / charset:",
-            e?.code || e?.message || e
-        );
+        console.error("[DB] Failed to set session time_zone / charset:", e?.code || e?.message || e);
     }
 }
+
+// ------------------------
+// Sessions (MySQL-backed)
+// ------------------------
+if (!process.env.SESSION_SECRET) {
+    console.error("Missing SESSION_SECRET in environment.");
+    process.exit(1);
+}
+
+const MySQLStore = MySQLStoreFactory(session);
+const sessionStore = new MySQLStore(
+    {
+        // creates `sessions` table automatically
+        createDatabaseTable: true,
+        // session lifetime (ms)
+        expiration: 1000 * 60 * 60 * 24 * 14,
+        // cleanup frequency (ms)
+        checkExpirationInterval: 1000 * 60 * 60,
+    },
+    pool
+);
+
+app.use(
+    session({
+        name: process.env.SESSION_COOKIE_NAME || "airbuddy_sid",
+        secret: process.env.SESSION_SECRET,
+        store: sessionStore,
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+            httpOnly: true,
+            secure: true, // behind HTTPS (nginx)
+            sameSite: "lax", // works for OAuth redirects in top-level navigation
+            // Domain optional. For air2 only, you can omit or set to air2.earthen.io
+            domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
+            maxAge: 1000 * 60 * 60 * 24 * 14,
+        },
+    })
+);
 
 // ------------------------
 // Static files (charts)
@@ -140,19 +155,23 @@ app.use(
 );
 
 // ------------------------
-// Landing page
-// NOTE: landing.js should apply the nonce to its inline scripts:
-//   <script nonce="${esc(res.locals.cspNonce)}"> ... </script>
+// Auth routes (Buwana SSO)
+// ------------------------
+// These set req.session.user on successful login
+app.use("/api/auth", authRouter(pool));
+
+// ------------------------
+// Landing page (phase 1)
 // ------------------------
 app.use("/", landingRouter(pool));
 
 // ------------------------
-// System routes
+// System routes (unauth)
 // ------------------------
 app.use("/api", systemRouter(pool, startedAt));
 
 // ------------------------
-// API v1 (authenticated)
+// API v1 (device-authenticated)
 // ------------------------
 app.use("/api", deviceAuth(pool), telemetryRouter(pool));
 app.use("/api", deviceAuth(pool), deviceRouter(pool));
