@@ -1,24 +1,4 @@
 // src/server.js
-
-import mysql from "mysql2"; // add at top
-
-const MySQLStore = MySQLStoreFactory(session);
-
-const sessionStore = new MySQLStore(
-    {
-        createDatabaseTable: true,
-        expiration: 1000 * 60 * 60 * 24 * 14,
-        checkExpirationInterval: 1000 * 60 * 60,
-    },
-    mysql.createPool({
-        host: process.env.DB_HOST,
-        port: Number(process.env.DB_PORT || 3306),
-        user: process.env.DB_USER,
-        password: process.env.DB_PASS,
-        database: process.env.DB_NAME,
-    })
-);
-
 import express from "express";
 import dotenv from "dotenv";
 import helmet from "helmet";
@@ -28,16 +8,19 @@ import { fileURLToPath } from "url";
 
 import session from "express-session";
 import MySQLStoreFactory from "express-mysql-session";
+import mysql from "mysql2"; // IMPORTANT: for express-mysql-session store
 
 import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
+import { requireUser } from "./middleware/requireUser.js";
+
 import { telemetryRouter } from "./routes/telemetry.js";
 import { deviceRouter } from "./routes/device.js";
 import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
-import { landingRouter } from "./pages/landing.js";
 import { dashboardRouter } from "./routes/dashboard.js";
-import { requireUser } from "./middleware/requireUser.js";
+
+import { landingRouter } from "./pages/landing.js";
 
 dotenv.config();
 
@@ -47,9 +30,6 @@ dotenv.config();
 process.env.TZ = process.env.TZ || "Asia/Jakarta";
 const MYSQL_SESSION_TZ = "+00:00";
 
-// ------------------------
-// Express app
-// ------------------------
 const app = express();
 app.set("trust proxy", true);
 
@@ -65,7 +45,7 @@ process.on("uncaughtException", (e) => {
 });
 
 // ------------------------
-// Security headers
+// Security headers (CSP + fonts)
 // ------------------------
 app.use((req, res, next) => {
     res.locals.cspNonce = Buffer.from(`${Date.now()}-${Math.random()}`).toString("base64");
@@ -102,10 +82,9 @@ const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
 
 // ------------------------
-// DB pool
+// DB pool (your app pool, mysql2/promise)
 // ------------------------
 let pool;
-
 try {
     pool = makePool(process.env);
 } catch (e) {
@@ -113,26 +92,16 @@ try {
     process.exit(1);
 }
 
-// ------------------------
-// Ensure DB session timezone
-// ------------------------
+// Ensure MySQL session timezone is UTC (and charset predictable).
 async function initDbSession() {
     try {
         await pool.query(`SET time_zone = ?`, [MYSQL_SESSION_TZ]);
         await pool.query(`SET NAMES utf8mb4`);
-
-        const [rows] = await pool.query(
-            `SELECT @@session.time_zone AS tz, NOW() AS now_session`
-        );
-
+        const [rows] = await pool.query(`SELECT @@session.time_zone AS tz, NOW() AS now_session`);
         const info = rows && rows[0] ? rows[0] : null;
-
         console.log("[DB] session time_zone:", info?.tz, "NOW():", info?.now_session);
     } catch (e) {
-        console.error(
-            "[DB] Failed to set session time_zone / charset:",
-            e?.code || e?.message || e
-        );
+        console.error("[DB] Failed to set session time_zone / charset:", e?.code || e?.message || e);
     }
 }
 
@@ -144,15 +113,26 @@ if (!process.env.SESSION_SECRET) {
     process.exit(1);
 }
 
+// express-mysql-session expects a "mysql2" (callback-style) pool, not mysql2/promise.
+const sessionDbPool = mysql.createPool({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT || 3306),
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS, // NOTE: your env uses DB_PASS (not DB_PASSWD)
+    database: process.env.DB_NAME,
+    connectionLimit: 10,
+});
+
+// This is the ONLY MySQLStore declaration in the file
 const MySQLStore = MySQLStoreFactory(session);
 
 const sessionStore = new MySQLStore(
     {
         createDatabaseTable: true,
-        expiration: 1000 * 60 * 60 * 24 * 14,
-        checkExpirationInterval: 1000 * 60 * 60,
+        expiration: 1000 * 60 * 60 * 24 * 14, // 14d
+        checkExpirationInterval: 1000 * 60 * 60, // 1h cleanup
     },
-    pool
+    sessionDbPool
 );
 
 app.use(
@@ -164,7 +144,7 @@ app.use(
         saveUninitialized: false,
         cookie: {
             httpOnly: true,
-            secure: true,
+            secure: true, // behind nginx TLS
             sameSite: "lax",
             domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
             maxAge: 1000 * 60 * 60 * 24 * 14,
@@ -173,7 +153,8 @@ app.use(
 );
 
 // ------------------------
-// Static files
+// Static files (charts)
+// /public => /static/*
 // ------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -193,7 +174,7 @@ app.use(
 app.use("/api/auth", authRouter(pool));
 
 // ------------------------
-// Landing page
+// Landing page (phase 1)
 // ------------------------
 app.use("/", landingRouter(pool));
 
@@ -203,13 +184,13 @@ app.use("/", landingRouter(pool));
 app.use("/api", systemRouter(pool, startedAt));
 
 // ------------------------
-// Device API (device-auth)
+// Device API (device-authenticated)
 // ------------------------
 app.use("/api", deviceAuth(pool), telemetryRouter(pool));
 app.use("/api", deviceAuth(pool), deviceRouter(pool));
 
 // ------------------------
-// Dashboard API (user-auth)
+// Dashboard API (user-authenticated)
 // ------------------------
 app.use("/api", requireUser, dashboardRouter(pool));
 
@@ -222,7 +203,7 @@ app.use((err, req, res, next) => {
 });
 
 // ------------------------
-// Start server
+// Start Server
 // ------------------------
 (async () => {
     await initDbSession();
