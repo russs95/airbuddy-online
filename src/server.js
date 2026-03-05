@@ -16,11 +16,8 @@ import { deviceRouter } from "./routes/device.js";
 import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { landingRouter } from "./pages/landing.js";
-
 import { dashboardRouter } from "./routes/dashboard.js";
 import { requireUser } from "./middleware/requireUser.js";
-
-app.use("/api", requireUser, dashboardRouter(pool));
 
 dotenv.config();
 
@@ -30,6 +27,9 @@ dotenv.config();
 process.env.TZ = process.env.TZ || "Asia/Jakarta";
 const MYSQL_SESSION_TZ = "+00:00";
 
+// ------------------------
+// Express app
+// ------------------------
 const app = express();
 app.set("trust proxy", true);
 
@@ -39,12 +39,13 @@ app.set("trust proxy", true);
 process.on("unhandledRejection", (e) => {
     console.error("UNHANDLED REJECTION:", e && (e.stack || e));
 });
+
 process.on("uncaughtException", (e) => {
     console.error("UNCAUGHT EXCEPTION:", e && (e.stack || e));
 });
 
 // ------------------------
-// Security headers (CSP + fonts)
+// Security headers
 // ------------------------
 app.use((req, res, next) => {
     res.locals.cspNonce = Buffer.from(`${Date.now()}-${Math.random()}`).toString("base64");
@@ -75,7 +76,7 @@ app.use(
 // ------------------------
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "256kb" }));
-app.use(express.urlencoded({ extended: false })); // for form-encoded token exchanges if needed
+app.use(express.urlencoded({ extended: false }));
 
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
@@ -84,6 +85,7 @@ const { PORT = 3000 } = process.env;
 // DB pool
 // ------------------------
 let pool;
+
 try {
     pool = makePool(process.env);
 } catch (e) {
@@ -91,16 +93,26 @@ try {
     process.exit(1);
 }
 
-// Ensure MySQL session timezone is UTC (and charset predictable).
+// ------------------------
+// Ensure DB session timezone
+// ------------------------
 async function initDbSession() {
     try {
         await pool.query(`SET time_zone = ?`, [MYSQL_SESSION_TZ]);
         await pool.query(`SET NAMES utf8mb4`);
-        const [rows] = await pool.query(`SELECT @@session.time_zone AS tz, NOW() AS now_session`);
+
+        const [rows] = await pool.query(
+            `SELECT @@session.time_zone AS tz, NOW() AS now_session`
+        );
+
         const info = rows && rows[0] ? rows[0] : null;
+
         console.log("[DB] session time_zone:", info?.tz, "NOW():", info?.now_session);
     } catch (e) {
-        console.error("[DB] Failed to set session time_zone / charset:", e?.code || e?.message || e);
+        console.error(
+            "[DB] Failed to set session time_zone / charset:",
+            e?.code || e?.message || e
+        );
     }
 }
 
@@ -113,13 +125,11 @@ if (!process.env.SESSION_SECRET) {
 }
 
 const MySQLStore = MySQLStoreFactory(session);
+
 const sessionStore = new MySQLStore(
     {
-        // creates `sessions` table automatically
         createDatabaseTable: true,
-        // session lifetime (ms)
         expiration: 1000 * 60 * 60 * 24 * 14,
-        // cleanup frequency (ms)
         checkExpirationInterval: 1000 * 60 * 60,
     },
     pool
@@ -134,9 +144,8 @@ app.use(
         saveUninitialized: false,
         cookie: {
             httpOnly: true,
-            secure: true, // behind HTTPS (nginx)
-            sameSite: "lax", // works for OAuth redirects in top-level navigation
-            // Domain optional. For air2 only, you can omit or set to air2.earthen.io
+            secure: true,
+            sameSite: "lax",
             domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
             maxAge: 1000 * 60 * 60 * 24 * 14,
         },
@@ -144,8 +153,7 @@ app.use(
 );
 
 // ------------------------
-// Static files (charts)
-// /public => /static/*
+// Static files
 // ------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -162,27 +170,31 @@ app.use(
 // ------------------------
 // Auth routes (Buwana SSO)
 // ------------------------
-// These set req.session.user on successful login
 app.use("/api/auth", authRouter(pool));
 
 // ------------------------
-// Landing page (phase 1)
+// Landing page
 // ------------------------
 app.use("/", landingRouter(pool));
 
 // ------------------------
-// System routes (unauth)
+// System routes (public)
 // ------------------------
 app.use("/api", systemRouter(pool, startedAt));
 
 // ------------------------
-// API v1 (device-authenticated)
+// Device API (device-auth)
 // ------------------------
 app.use("/api", deviceAuth(pool), telemetryRouter(pool));
 app.use("/api", deviceAuth(pool), deviceRouter(pool));
 
 // ------------------------
-// Global error handler (prints real stack)
+// Dashboard API (user-auth)
+// ------------------------
+app.use("/api", requireUser, dashboardRouter(pool));
+
+// ------------------------
+// Global error handler
 // ------------------------
 app.use((err, req, res, next) => {
     console.error("UNHANDLED EXPRESS ERROR:", err && (err.stack || err));
@@ -190,7 +202,7 @@ app.use((err, req, res, next) => {
 });
 
 // ------------------------
-// Start Server
+// Start server
 // ------------------------
 (async () => {
     await initDbSession();
