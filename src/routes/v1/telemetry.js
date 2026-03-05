@@ -1,7 +1,10 @@
-// src/routes/telemetry.js
+// src/routes/v1/telemetry.js
 import express from "express";
-import { isFiniteNumber } from "../utils/http.js"; // <-- we no longer use toMySQLDatetimeFromUnixSeconds
+import { isFiniteNumber } from "../../utils/http.js"; // correct for routes/v1 -> utils
 
+// ------------------------------------------------------------
+// Validation
+// ------------------------------------------------------------
 function validateTelemetryBody(body) {
     if (!body || typeof body !== "object") return "Body must be a JSON object";
 
@@ -11,6 +14,7 @@ function validateTelemetryBody(body) {
         return "`recorded_at` must be a unix timestamp number (seconds)";
     }
 
+    // 2000-01-01 .. 2100-01-01 rough guardrails
     if (recorded_at < 946684800 || recorded_at > 4102444800) {
         return "`recorded_at` out of expected range";
     }
@@ -38,13 +42,59 @@ function validateTelemetryBody(body) {
     return null;
 }
 
+// ------------------------------------------------------------
+// "Bad zero" gate (ignore obvious boot / invalid readings)
+// ------------------------------------------------------------
+// We treat these as "almost certainly invalid" for AirBuddy when exactly 0.
+// (Some sensors can legitimately produce 0 for TVOC, AQI, etc, so we don't block those.)
+function isBadZeroTelemetry(values) {
+    if (!values || typeof values !== "object") return "values_missing";
+
+    // Keys where 0 is very likely bogus
+    const suspectKeys = ["temp_c", "rh_pct", "eco2_ppm"];
+
+    for (const k of suspectKeys) {
+        if (values[k] !== undefined && values[k] !== null && Number(values[k]) === 0) {
+            return `invalid_zero_${k}`;
+        }
+    }
+
+    // Optional extra guard: if *all* numeric values provided are exactly 0, ignore.
+    const numericPairs = Object.entries(values).filter(
+        ([, v]) => typeof v === "number" && Number.isFinite(v)
+    );
+    if (numericPairs.length > 0 && numericPairs.every(([, v]) => v === 0)) {
+        return "invalid_all_numeric_zero";
+    }
+
+    return null;
+}
+
+// ------------------------------------------------------------
+// Router
+// ------------------------------------------------------------
 export function telemetryRouter(pool) {
     const router = express.Router();
 
+    // --------------------------------------------------------
+    // POST /api/v1/telemetry  (device-authenticated upstream)
+    // --------------------------------------------------------
     router.post("/v1/telemetry", async (req, res) => {
         const err = validateTelemetryBody(req.body);
         if (err) {
             return res.status(400).json({ ok: false, error: "bad_payload", message: err });
+        }
+
+        // NEW: ignore obvious bogus boot readings (do NOT store in DB)
+        const zeroErr = isBadZeroTelemetry(req.body.values);
+        if (zeroErr) {
+            // 202: "accepted but not stored" (prevents aggressive retries & keeps drift help)
+            return res.status(202).json({
+                ok: true,
+                ignored: true,
+                reason: zeroErr,
+                server_now: Math.floor(Date.now() / 1000),
+            });
         }
 
         const deviceId = req.device.device_id;
@@ -78,9 +128,9 @@ export function telemetryRouter(pool) {
             try {
                 await conn.query(
                     `INSERT INTO telemetry_readings_tb
-            (device_id, recorded_at, received_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
-           VALUES
-            (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
+                        (device_id, recorded_at, received_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
+                     VALUES
+                        (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
                     [deviceId, recordedAtUnix, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
                 );
             } catch (e) {
@@ -88,13 +138,14 @@ export function telemetryRouter(pool) {
             }
 
             // 2) Update last_seen (use UTC to stay consistent)
-            await conn.query("UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?", [
-                deviceId,
-            ]);
+            await conn.query(
+                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?",
+                [deviceId]
+            );
 
             await conn.commit();
 
-            // NEW: include server unix time (seconds) to help device detect drift
+            // include server unix time (seconds) to help device detect drift
             const serverNowUnix = Math.floor(Date.now() / 1000);
 
             return res.status(200).json({
@@ -113,6 +164,11 @@ export function telemetryRouter(pool) {
         }
     });
 
+    // --------------------------------------------------------
+    // GET /api/v1/trends  (device-authenticated upstream)
+    // NOTE: This remains device-authenticated. Browser/user access
+    // should use a separate user-auth endpoint (later).
+    // --------------------------------------------------------
     router.get("/v1/trends", async (req, res) => {
         const deviceId = req.device.device_id;
         const hours = Math.max(1, Math.min(168, Number(req.query.hours) || 24));
@@ -120,18 +176,18 @@ export function telemetryRouter(pool) {
         try {
             const [rows] = await pool.query(
                 `
-            SELECT
-                UNIX_TIMESTAMP(recorded_at) AS ts,
-                CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE) AS eco2,
-                JSON_EXTRACT(values_json, '$.temp_c') AS temp,
-                JSON_EXTRACT(values_json, '$.rtc_temp_c') AS rtc_temp,
-                JSON_EXTRACT(values_json, '$.rh_pct') AS rh,
-                JSON_EXTRACT(values_json, '$.tvoc_ppb') AS tvoc
-            FROM telemetry_readings_tb
-            WHERE device_id = ?
-              AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
-            ORDER BY recorded_at ASC
-            `,
+                SELECT
+                    UNIX_TIMESTAMP(recorded_at) AS ts,
+                    CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE) AS eco2,
+                    JSON_EXTRACT(values_json, '$.temp_c') AS temp,
+                    JSON_EXTRACT(values_json, '$.rtc_temp_c') AS rtc_temp,
+                    JSON_EXTRACT(values_json, '$.rh_pct') AS rh,
+                    JSON_EXTRACT(values_json, '$.tvoc_ppb') AS tvoc
+                FROM telemetry_readings_tb
+                WHERE device_id = ?
+                  AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
+                ORDER BY recorded_at ASC
+                `,
                 [deviceId, hours]
             );
 
@@ -160,10 +216,9 @@ export function telemetryRouter(pool) {
                 rhs,
                 tvocs,
             });
-
         } catch (e) {
-            console.error("trends error:", e);
-            res.status(500).json({ ok: false });
+            console.error("trends error:", e && (e.stack || e?.code || e?.message || e));
+            res.status(500).json({ ok: false, error: "server_error" });
         }
     });
 
