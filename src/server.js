@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import session from "express-session";
-import MySQLStoreFactory from "express-mysql-session";
+
 import mysql from "mysql2"; // IMPORTANT: for express-mysql-session store
 
 import { makePool } from "./db/pool.js";
@@ -123,7 +123,8 @@ const sessionDbPool = mysql.createPool({
     connectionLimit: 10,
 });
 
-
+// This is the ONLY MySQLStore declaration in the file
+const MySQLStore = MySQLStoreFactory(session);
 
 const sessionStore = new MySQLStore(
     {
