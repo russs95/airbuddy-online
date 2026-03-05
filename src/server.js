@@ -21,6 +21,7 @@ import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 
 import { landingRouter } from "./pages/landing.js";
+import makeBuwanaRouter from "./routes/buwana.js";
 
 dotenv.config();
 
@@ -43,6 +44,13 @@ process.on("unhandledRejection", (e) => {
 process.on("uncaughtException", (e) => {
     console.error("UNCAUGHT EXCEPTION:", e && (e.stack || e));
 });
+
+
+// ------------------------
+// Buwana sync
+// ------------------------
+app.use("/api/buwana", makeBuwanaRouter({ pool }));
+
 
 // ------------------------
 // Security headers (CSP + fonts)
@@ -201,6 +209,8 @@ app.use((err, req, res, next) => {
     console.error("UNHANDLED EXPRESS ERROR:", err && (err.stack || err));
     res.status(500).type("text").send("server_error");
 });
+
+
 
 // ------------------------
 // Start Server
