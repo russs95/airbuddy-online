@@ -17,6 +17,11 @@ import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { landingRouter } from "./pages/landing.js";
 
+import { dashboardRouter } from "./routes/dashboard.js";
+import { requireUser } from "./middleware/requireUser.js";
+
+app.use("/api", requireUser, dashboardRouter(pool));
+
 dotenv.config();
 
 // -------------------------------------------------------------------
