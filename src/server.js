@@ -8,17 +8,17 @@ import { fileURLToPath } from "url";
 
 import session from "express-session";
 import MySQLStoreFactory from "express-mysql-session";
-import mysql from "mysql2"; // IMPORTANT: for express-mysql-session store
+import mysql from "mysql2";
 
 import { makePool } from "./db/pool.js";
 import { deviceAuth } from "./middleware/deviceAuth.js";
 import { requireUser } from "./middleware/requireUser.js";
 
-// v1 (device) routes
+// v1 device routes
 import { telemetryRouter } from "./routes/v1/telemetry.js";
 import { deviceRouter } from "./routes/v1/device.js";
 
-// system + user routes (NOT v1)
+// system + user routes
 import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
@@ -27,6 +27,7 @@ import { landingRouter } from "./pages/landing.js";
 import makeBuwanaRouter from "./routes/buwana.js";
 
 dotenv.config();
+
 
 // -------------------------------------------------------------------
 // TIMEZONE FOUNDATIONS
@@ -37,20 +38,22 @@ const MYSQL_SESSION_TZ = "+00:00";
 const app = express();
 app.set("trust proxy", true);
 
-// ------------------------
-// Process-level crash visibility
-// ------------------------
+
+// -------------------------------------------------------------------
+// PROCESS LEVEL ERROR VISIBILITY
+// -------------------------------------------------------------------
 process.on("unhandledRejection", (e) => {
-    console.error("UNHANDLED REJECTION:", e && (e.stack || e));
+    console.error("UNHANDLED REJECTION:", e?.stack || e);
 });
 
 process.on("uncaughtException", (e) => {
-    console.error("UNCAUGHT EXCEPTION:", e && (e.stack || e));
+    console.error("UNCAUGHT EXCEPTION:", e?.stack || e);
 });
 
-// ------------------------
-// Logging + body parsing
-// ------------------------
+
+// -------------------------------------------------------------------
+// LOGGING + BODY PARSING
+// -------------------------------------------------------------------
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false }));
@@ -58,10 +61,12 @@ app.use(express.urlencoded({ extended: false }));
 const startedAt = Date.now();
 const { PORT = 3000 } = process.env;
 
-// ------------------------
-// DB pool (mysql2/promise)
-// ------------------------
+
+// -------------------------------------------------------------------
+// DATABASE POOL
+// -------------------------------------------------------------------
 let pool;
+
 try {
     pool = makePool(process.env);
 } catch (e) {
@@ -69,14 +74,16 @@ try {
     process.exit(1);
 }
 
-// ------------------------
-// Buwana sync route (PUBLIC, secret-protected inside router)
-// ------------------------
+
+// -------------------------------------------------------------------
+// BUWANA SYNC ROUTE (PUBLIC)
+// -------------------------------------------------------------------
 app.use("/api/buwana", makeBuwanaRouter({ pool }));
 
-// ------------------------
-// Security headers (CSP + fonts)
-// ------------------------
+
+// -------------------------------------------------------------------
+// SECURITY HEADERS
+// -------------------------------------------------------------------
 app.use((req, res, next) => {
     res.locals.cspNonce = Buffer.from(`${Date.now()}-${Math.random()}`).toString("base64");
     next();
@@ -101,32 +108,41 @@ app.use(
     })
 );
 
-// ------------------------
-// Ensure MySQL session timezone
-// ------------------------
+
+// -------------------------------------------------------------------
+// DB SESSION TIMEZONE INIT
+// -------------------------------------------------------------------
 async function initDbSession() {
     try {
         await pool.query(`SET time_zone = ?`, [MYSQL_SESSION_TZ]);
         await pool.query(`SET NAMES utf8mb4`);
 
-        const [rows] = await pool.query(`SELECT @@session.time_zone AS tz, NOW() AS now_session`);
-        const info = rows && rows[0] ? rows[0] : null;
+        const [rows] = await pool.query(
+            `SELECT @@session.time_zone AS tz, NOW() AS now_session`
+        );
 
-        console.log("[DB] session time_zone:", info?.tz, "NOW():", info?.now_session);
+        const info = rows?.[0];
+
+        console.log(
+            "[DB] session time_zone:",
+            info?.tz,
+            "NOW():",
+            info?.now_session
+        );
     } catch (e) {
-        console.error("[DB] Failed to set session time_zone / charset:", e?.code || e?.message || e);
+        console.error("[DB] Failed to set session timezone:", e?.code || e?.message || e);
     }
 }
 
-// ------------------------
-// Sessions (MySQL-backed)
-// ------------------------
+
+// -------------------------------------------------------------------
+// SESSION STORE
+// -------------------------------------------------------------------
 if (!process.env.SESSION_SECRET) {
     console.error("Missing SESSION_SECRET in environment.");
     process.exit(1);
 }
 
-// express-mysql-session expects mysql2 (callback API), not mysql2/promise
 const sessionDbPool = mysql.createPool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT || 3306),
@@ -156,7 +172,7 @@ app.use(
         saveUninitialized: false,
         cookie: {
             httpOnly: true,
-            secure: true, // TLS at nginx
+            secure: true,
             sameSite: "lax",
             domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
             maxAge: 1000 * 60 * 60 * 24 * 14,
@@ -164,9 +180,10 @@ app.use(
     })
 );
 
-// ------------------------
-// Static files (charts)
-// ------------------------
+
+// -------------------------------------------------------------------
+// STATIC FILES
+// -------------------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -179,55 +196,70 @@ app.use(
     })
 );
 
-// ------------------------
-// Auth routes (Buwana SSO)
-// ------------------------
+
+// -------------------------------------------------------------------
+// AUTH ROUTES
+// -------------------------------------------------------------------
 app.use("/api/auth", authRouter(pool));
 
-// ------------------------
-// Landing page
-// ------------------------
+
+// -------------------------------------------------------------------
+// LANDING PAGE
+// -------------------------------------------------------------------
 app.use("/", landingRouter(pool));
 
 
-// Convenience: allow frontend to call /api/me (session user)
+// -------------------------------------------------------------------
+// SESSION USER DEBUG
+// -------------------------------------------------------------------
 app.get("/api/me", (req, res) => {
     const u = req.session?.user;
-    if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
+    if (!u) {
+        return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
     return res.json({ ok: true, user: u });
 });
 
 
-
-// ------------------------
-// System routes (public health/live/etc)
-// ------------------------
+// -------------------------------------------------------------------
+// SYSTEM ROUTES (health, live)
+// -------------------------------------------------------------------
 app.use("/api", systemRouter(pool, startedAt));
 
-// ------------------------
-// Dashboard API (user authenticated)
-// (this is where /api/me should live)
-// ------------------------
+
+// -------------------------------------------------------------------
+// USER DASHBOARD API
+// -------------------------------------------------------------------
 app.use("/api", requireUser, dashboardRouter(pool));
 
-// ------------------------
-// Device API (device authenticated) — v1 namespace
-// ------------------------
-app.use("/api/v1", deviceAuth(pool), telemetryRouter(pool));
-app.use("/api/v1", deviceAuth(pool), deviceRouter(pool));
 
-// ------------------------
-// Global error handler
-// ------------------------
+// -------------------------------------------------------------------
+// DEVICE API v1
+// -------------------------------------------------------------------
+const v1 = express.Router();
+
+v1.use(deviceAuth(pool));
+
+v1.use(telemetryRouter(pool));
+v1.use(deviceRouter(pool));
+
+app.use("/api/v1", v1);
+
+
+// -------------------------------------------------------------------
+// GLOBAL ERROR HANDLER
+// -------------------------------------------------------------------
 app.use((err, req, res, next) => {
-    console.error("UNHANDLED EXPRESS ERROR:", err && (err.stack || err));
+    console.error("UNHANDLED EXPRESS ERROR:", err?.stack || err);
     res.status(500).type("text").send("server_error");
 });
 
-// ------------------------
-// Start server
-// ------------------------
+
+// -------------------------------------------------------------------
+// START SERVER
+// -------------------------------------------------------------------
 (async () => {
+
     await initDbSession();
 
     app.listen(Number(PORT), "127.0.0.1", () => {
@@ -235,4 +267,5 @@ app.use((err, req, res, next) => {
             `AirBuddy Online API listening on http://127.0.0.1:${PORT} (TZ=${process.env.TZ}, DB_TZ=${MYSQL_SESSION_TZ})`
         );
     });
+
 })();
