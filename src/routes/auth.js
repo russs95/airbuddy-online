@@ -44,6 +44,37 @@ function randomString(lenBytes = 32) {
     return b64url(crypto.randomBytes(lenBytes));
 }
 
+// NEW: probe JWKS endpoint so we can see status/content-type/body head
+async function probeJwks(url) {
+    try {
+        const r = await fetch(url, { headers: { accept: "application/json" } });
+        const ct = r.headers.get("content-type") || "";
+        const text = await r.text();
+        const head = text.slice(0, 160).replace(/\n/g, "\\n");
+
+        if (!r.ok) {
+            console.error(
+                `[AUTH] JWKS PROBE non-200 url=${url} status=${r.status} ct=${ct} head=${head}`
+            );
+            return false;
+        }
+
+        try {
+            JSON.parse(text);
+            console.log(`[AUTH] JWKS PROBE ok url=${url} status=${r.status} ct=${ct}`);
+            return true;
+        } catch (e) {
+            console.error(
+                `[AUTH] JWKS PROBE bad-json url=${url} status=${r.status} ct=${ct} head=${head}`
+            );
+            return false;
+        }
+    } catch (e) {
+        console.error(`[AUTH] JWKS PROBE fetch-failed url=${url} err=${e?.message || e}`);
+        return false;
+    }
+}
+
 async function exchangeCodeForTokens({ code, codeVerifier }) {
     const body = new URLSearchParams();
     body.set("grant_type", "authorization_code");
@@ -90,7 +121,20 @@ async function exchangeCodeForTokens({ code, codeVerifier }) {
 }
 
 async function verifyIdToken(idToken) {
-    const jwks = createRemoteJWKSet(new URL(BUWANA_JWKS_URI));
+    // NEW: print what this running process thinks it's using
+    console.log("[AUTH] Using JWKS:", JSON.stringify(BUWANA_JWKS_URI));
+
+    // NEW: probe first (logs non-200 or bad json with head)
+    const ok = await probeJwks(BUWANA_JWKS_URI);
+    if (!ok) {
+        throw new Error(`JWKS probe failed for ${BUWANA_JWKS_URI}`);
+    }
+
+    // NEW: force Accept: application/json for jose fetch
+    const jwks = createRemoteJWKSet(new URL(BUWANA_JWKS_URI), {
+        headers: { accept: "application/json" },
+    });
+
     const opts = { audience: BUWANA_CLIENT_ID };
     if (BUWANA_ISSUER) opts.issuer = BUWANA_ISSUER;
 
