@@ -244,15 +244,15 @@ export function authRouter(pool) {
             try {
                 await pool.query(
                     `
-                        INSERT INTO users_tb (buwana_sub, buwana_id, email, first_name, last_name, full_name)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                            ON DUPLICATE KEY UPDATE
-                                                 buwana_id = VALUES(buwana_id),
-                                                 email = VALUES(email),
-                                                 first_name = VALUES(first_name),
-                                                 last_name = VALUES(last_name),
-                                                 full_name = VALUES(full_name)
-                    `,
+            INSERT INTO users_tb (buwana_sub, buwana_id, email, first_name, last_name, full_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              buwana_id = VALUES(buwana_id),
+              email = VALUES(email),
+              first_name = VALUES(first_name),
+              last_name = VALUES(last_name),
+              full_name = VALUES(full_name)
+          `,
                     [
                         user.buwana_sub,
                         user.buwana_id,
