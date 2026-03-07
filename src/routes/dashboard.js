@@ -2,6 +2,8 @@
 import express from "express";
 import crypto from "crypto";
 
+
+
 function sha256Hex(value) {
     return crypto.createHash("sha256").update(String(value)).digest("hex");
 }
@@ -34,7 +36,7 @@ async function getCurrentUserRow(db, sessionUser) {
     return rows[0] || null;
 }
 
-async function getAccessibleDeviceRow(db, userId, deviceUid) {
+async function getAccessibleDeviceById(db, userId, deviceId) {
     const [rows] = await db.query(
         `
             SELECT
@@ -53,10 +55,10 @@ async function getAccessibleDeviceRow(db, userId, deviceUid) {
                      LEFT JOIN rooms_tb r
                                ON r.room_id = d.room_id
             WHERE hm.user_id = ?
-              AND d.device_uid = ?
+              AND d.device_id = ?
                 LIMIT 1
         `,
-        [userId, deviceUid]
+        [userId, Number(deviceId)]
     );
 
     return rows[0] || null;
@@ -64,6 +66,110 @@ async function getAccessibleDeviceRow(db, userId, deviceUid) {
 
 export function dashboardRouter(pool) {
     const router = express.Router();
+
+    // ------------------------------------------------------------
+    // POST /api/devices/:deviceId/reset-key
+    // revoke old active keys, create a new key, return it once
+    // ------------------------------------------------------------
+    router.post("/devices/:deviceId/reset-key", async (req, res) => {
+        const sessionUser = req.session?.user;
+        const conn = await pool.getConnection();
+
+        try {
+            await conn.beginTransaction();
+
+            const user = await getCurrentUserRow(conn, sessionUser);
+
+            if (!user) {
+                await conn.rollback();
+                return res.status(404).json({
+                    ok: false,
+                    error: "user_not_found",
+                    message: "Logged-in user does not exist in users_tb.",
+                });
+            }
+
+            const deviceId = Number(req.params.deviceId);
+            if (!deviceId) {
+                await conn.rollback();
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_device_id",
+                    message: "Valid deviceId is required.",
+                });
+            }
+
+            const device = await getAccessibleDeviceById(conn, user.user_id, deviceId);
+            if (!device) {
+                await conn.rollback();
+                return res.status(404).json({
+                    ok: false,
+                    error: "device_not_found",
+                    message: "Device not found or not accessible.",
+                });
+            }
+
+            await conn.query(
+                `
+                UPDATE device_keys_tb
+                SET revoked_at = NOW()
+                WHERE device_id = ?
+                  AND revoked_at IS NULL
+                `,
+                [device.device_id]
+            );
+
+            const plainDeviceKey = generateDeviceKey();
+            const keyHash = sha256Hex(plainDeviceKey);
+
+            await conn.query(
+                `
+                INSERT INTO device_keys_tb (
+                    device_id,
+                    key_hash,
+                    label,
+                    created_at
+                )
+                VALUES (?, ?, 'reset', NOW())
+                `,
+                [device.device_id, keyHash]
+            );
+
+            await conn.commit();
+
+            return res.json({
+                ok: true,
+                message: "Device key reset successfully.",
+                device: {
+                    device_id: device.device_id,
+                    device_uid: device.device_uid,
+                    device_name: device.device_name,
+                },
+                device_key: plainDeviceKey,
+            });
+        } catch (e) {
+            try {
+                await conn.rollback();
+            } catch {}
+
+            if (e?.code === "ER_DUP_ENTRY") {
+                return res.status(409).json({
+                    ok: false,
+                    error: "duplicate_device_key",
+                    message: "Could not generate a unique device key. Please try again.",
+                });
+            }
+
+            console.error("device key reset error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not reset device key.",
+            });
+        } finally {
+            conn.release();
+        }
+    });
 
     // ------------------------------------------------------------
     // GET /api/me
