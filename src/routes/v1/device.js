@@ -1,4 +1,4 @@
-// src/routes/device.js
+// src/routes/v1/device.js
 import express from "express";
 
 // -------------------------------------------------
@@ -9,7 +9,7 @@ import express from "express";
 function tzOffsetMinNow(ianaZone) {
     try {
         const now = new Date();
-        router.get("/device", async (req, res) => {
+
         const fmtParts = (tz) =>
             new Intl.DateTimeFormat("en-US", {
                 timeZone: tz,
@@ -34,21 +34,21 @@ function tzOffsetMinNow(ianaZone) {
         const t = toMap(fmtParts(ianaZone));
 
         const utcWall = Date.UTC(
-            +u.year,
-            +u.month - 1,
-            +u.day,
-            +u.hour,
-            +u.minute,
-            +u.second
+            Number(u.year),
+            Number(u.month) - 1,
+            Number(u.day),
+            Number(u.hour),
+            Number(u.minute),
+            Number(u.second)
         );
 
         const tzWallAsUTC = Date.UTC(
-            +t.year,
-            +t.month - 1,
-            +t.day,
-            +t.hour,
-            +t.minute,
-            +t.second
+            Number(t.year),
+            Number(t.month) - 1,
+            Number(t.day),
+            Number(t.hour),
+            Number(t.minute),
+            Number(t.second)
         );
 
         return Math.round((tzWallAsUTC - utcWall) / 60000);
@@ -60,7 +60,7 @@ function tzOffsetMinNow(ianaZone) {
 export function deviceRouter(pool) {
     const router = express.Router();
 
-    router.get("/v1/device", async (req, res) => {
+    router.get("/device", async (req, res) => {
         const deviceId = req.device.device_id;
         const compact = String(req.query.compact || "").trim() === "1";
 
@@ -68,33 +68,33 @@ export function deviceRouter(pool) {
         try {
             const [rows] = await conn.query(
                 `
-                    SELECT
-                        d.device_uid,
-                        d.device_name,
-                        d.device_type,
-                        d.firmware_version,
-                        d.status,
-                        d.last_seen_at,
-                        d.created_at,
+                SELECT
+                    d.device_uid,
+                    d.device_name,
+                    d.device_type,
+                    d.firmware_version,
+                    d.status,
+                    d.last_seen_at,
+                    d.created_at,
 
-                        d.home_id,
-                        d.room_id,
-                        d.claimed_by_user_id,
+                    d.home_id,
+                    d.room_id,
+                    d.claimed_by_user_id,
 
-                        h.home_name,
-                        r.room_name,
+                    h.home_name,
+                    r.room_name,
 
-                        u.user_id AS claimed_user_id,
-                        u.buwana_id AS claimed_buwana_id,
-                        u.full_name AS claimed_full_name,
-                        u.time_zone AS user_time_zone
+                    u.user_id AS claimed_user_id,
+                    u.buwana_id AS claimed_buwana_id,
+                    u.full_name AS claimed_full_name,
+                    u.time_zone AS user_time_zone
 
-                    FROM devices_tb d
-                             LEFT JOIN homes_tb h ON h.home_id = d.home_id
-                             LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-                             LEFT JOIN users_tb u ON u.user_id = d.claimed_by_user_id
-                    WHERE d.device_id = ?
-                        LIMIT 1
+                FROM devices_tb d
+                LEFT JOIN homes_tb h ON h.home_id = d.home_id
+                LEFT JOIN rooms_tb r ON r.room_id = d.room_id
+                LEFT JOIN users_tb u ON u.user_id = d.claimed_by_user_id
+                WHERE d.device_id = ?
+                LIMIT 1
                 `,
                 [deviceId]
             );
@@ -122,13 +122,11 @@ export function deviceRouter(pool) {
             if (compact) {
                 return res.status(200).json({
                     ok: true,
-
                     device: {
                         device_uid: row.device_uid,
                         device_name: row.device_name ?? null,
                         firmware_version: row.firmware_version ?? null,
                     },
-
                     assignment: {
                         home: row.home_id
                             ? {
@@ -136,14 +134,12 @@ export function deviceRouter(pool) {
                                 home_name: row.home_name ?? null,
                             }
                             : null,
-
                         room: row.room_id
                             ? {
                                 room_id: row.room_id,
                                 room_name: row.room_name ?? null,
                             }
                             : null,
-
                         user: row.claimed_user_id
                             ? {
                                 user_id: row.claimed_user_id,
@@ -153,7 +149,6 @@ export function deviceRouter(pool) {
                             }
                             : null,
                     },
-
                     time_zone: userTimeZone,
                     tz_offset_min,
                     timezone_offset_min: tz_offset_min,
@@ -163,7 +158,6 @@ export function deviceRouter(pool) {
 
             return res.status(200).json({
                 ok: true,
-
                 device: {
                     device_uid: row.device_uid,
                     device_name: row.device_name ?? null,
@@ -173,7 +167,6 @@ export function deviceRouter(pool) {
                     last_seen_at: row.last_seen_at,
                     created_at: row.created_at,
                 },
-
                 assignment: {
                     user: row.claimed_user_id
                         ? {
@@ -183,14 +176,12 @@ export function deviceRouter(pool) {
                             time_zone: userTimeZone,
                         }
                         : null,
-
                     home: row.home_id
                         ? {
                             home_id: row.home_id,
                             home_name: row.home_name ?? null,
                         }
                         : null,
-
                     room: row.room_id
                         ? {
                             room_id: row.room_id,
@@ -198,14 +189,13 @@ export function deviceRouter(pool) {
                         }
                         : null,
                 },
-
                 time_zone: userTimeZone,
                 tz_offset_min,
                 timezone_offset_min: tz_offset_min,
                 ts: Date.now(),
             });
         } catch (e) {
-            console.error("GET /v1/device error:", e?.code || e?.message || e);
+            console.error("GET /api/v1/device error:", e?.code || e?.message || e);
             return res.status(500).json({ ok: false, error: "server_error" });
         } finally {
             conn.release();
