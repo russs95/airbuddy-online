@@ -215,7 +215,7 @@ app.use("/", landingRouter(pool));
 app.get("/api/me", (req, res) => {
     const u = req.session?.user;
     if (!u) {
-        return res.status(401).json({ ok: false, error: "unauthorized" });
+        return res.status(401).json({ ok: false, error: "unauthorized session user" });
     }
     return res.json({ ok: true, user: u });
 });

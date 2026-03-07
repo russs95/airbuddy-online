@@ -277,7 +277,7 @@ export function authRouter(pool) {
     // Who am I? (canonical)
     router.get("/me", (req, res) => {
         const u = req.session?.user;
-        if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
+        if (!u) return res.status(401).json({ ok: false, error: "unauthorized who am i" });
         return res.json({ ok: true, user: u });
     });
 
@@ -286,7 +286,7 @@ export function authRouter(pool) {
     // but we also want /api/me globally, so we expose it here for server.js to mount too if desired)
     router.get("/__me_alias", (req, res) => {
         const u = req.session?.user;
-        if (!u) return res.status(401).json({ ok: false, error: "unauthorized" });
+        if (!u) return res.status(401).json({ ok: false, error: "unauthorized me alias" });
         return res.json({ ok: true, user: u });
     });
 
