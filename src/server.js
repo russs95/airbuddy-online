@@ -215,7 +215,7 @@ app.use("/", landingRouter(pool));
 app.get("/api/me", (req, res) => {
     const u = req.session?.user;
     if (!u) {
-        return res.status(401).json({ ok: false, error: "unauthorized session user" });
+        return res.status(401).json({ ok: false, error: "unauthorized" });
     }
     return res.json({ ok: true, user: u });
 });
@@ -228,22 +228,27 @@ app.use("/api", systemRouter(pool, startedAt));
 
 
 // -------------------------------------------------------------------
-// USER DASHBOARD API
-// -------------------------------------------------------------------
-app.use("/api", requireUser, dashboardRouter(pool));
-
-
-// -------------------------------------------------------------------
 // DEVICE API v1
+// IMPORTANT:
+// Mount BEFORE any broader /api requireUser middleware.
+// Otherwise /api/v1/* gets intercepted by browser/session auth.
 // -------------------------------------------------------------------
 const v1 = express.Router();
 
 v1.use(deviceAuth(pool));
-
 v1.use(telemetryRouter(pool));
 v1.use(deviceRouter(pool));
 
 app.use("/api/v1", v1);
+
+
+// -------------------------------------------------------------------
+// USER DASHBOARD API
+// IMPORTANT:
+// Narrow mount path so user auth only protects dashboard endpoints,
+// not device APIs.
+// -------------------------------------------------------------------
+app.use("/api/dashboard", requireUser, dashboardRouter(pool));
 
 
 // -------------------------------------------------------------------

@@ -8,6 +8,38 @@ function sha256Hex(value) {
     return crypto.createHash("sha256").update(String(value)).digest("hex");
 }
 
+function generateDeviceKey(bytes = 18) {
+    return crypto.randomBytes(bytes).toString("base64url");
+}
+
+async function getAccessibleDeviceRow(db, userId, deviceUid) {
+    const [rows] = await db.query(
+        `
+        SELECT
+            d.device_id,
+            d.device_uid,
+            d.device_name,
+            d.home_id,
+            d.room_id,
+            r.room_name,
+            h.home_name
+        FROM devices_tb d
+        INNER JOIN homes_tb h
+            ON h.home_id = d.home_id
+        INNER JOIN home_memberships_tb hm
+            ON hm.home_id = h.home_id
+        LEFT JOIN rooms_tb r
+            ON r.room_id = d.room_id
+        WHERE hm.user_id = ?
+          AND d.device_uid = ?
+        LIMIT 1
+        `,
+        [userId, deviceUid]
+    );
+
+    return rows[0] || null;
+}
+
 function parseJsonField(value, fallback = null) {
     if (value == null) return fallback;
     if (typeof value === "string") {
@@ -369,7 +401,6 @@ export function dashboardRouter(pool) {
         const {
             device_uid,
             device_name,
-            device_key,
             home_mode,
             home_id,
             new_home_name,
@@ -412,7 +443,6 @@ export function dashboardRouter(pool) {
 
         const trimmedDeviceUid = String(device_uid).trim();
         const trimmedDeviceName = device_name ? String(device_name).trim() : null;
-        const trimmedDeviceKey = String(device_key).trim();
         const trimmedNewHomeName = new_home_name ? String(new_home_name).trim() : "";
         const trimmedNewRoomName = new_room_name ? String(new_room_name).trim() : "";
 
@@ -618,7 +648,8 @@ export function dashboardRouter(pool) {
             );
 
             const deviceId = deviceInsert.insertId;
-            const keyHash = sha256Hex(trimmedDeviceKey);
+            const plainDeviceKey = generateDeviceKey();
+            const keyHash = sha256Hex(plainDeviceKey);
 
             // --------------------------------------------------------
             // Store hashed device key
@@ -647,6 +678,7 @@ export function dashboardRouter(pool) {
                     home_id: resolvedHomeId,
                     room_id: resolvedRoomId,
                 },
+                device_key: plainDeviceKey,
             });
         } catch (e) {
             try {
