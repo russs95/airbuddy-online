@@ -9,7 +9,7 @@ import express from "express";
 function tzOffsetMinNow(ianaZone) {
     try {
         const now = new Date();
-
+        router.get("/device", async (req, res) => {
         const fmtParts = (tz) =>
             new Intl.DateTimeFormat("en-US", {
                 timeZone: tz,

@@ -91,7 +91,7 @@ export function telemetryRouter(pool) {
     // --------------------------------------------------------
     // POST /api/v1/telemetry  (device-authenticated upstream)
     // --------------------------------------------------------
-    router.post("/v1/telemetry", async (req, res) => {
+    router.post("/telemetry", async (req, res) => {
         const err = validateTelemetryBody(req.body);
         if (err) {
             return res.status(400).json({ ok: false, error: "bad_payload", message: err });
@@ -199,7 +199,7 @@ export function telemetryRouter(pool) {
     // NOTE: This remains device-authenticated. Browser/user access
     // should use a separate user-auth endpoint later.
     // --------------------------------------------------------
-    router.get("/v1/trends", async (req, res) => {
+    router.get("/trends", async (req, res) => {
         const deviceId = req.device.device_id;
         const hours = Math.max(1, Math.min(168, Number(req.query.hours) || 24));
 

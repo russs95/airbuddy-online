@@ -248,7 +248,7 @@ app.use("/api/v1", v1);
 // Narrow mount path so user auth only protects dashboard endpoints,
 // not device APIs.
 // -------------------------------------------------------------------
-app.use("/api/dashboard", requireUser, dashboardRouter(pool));
+app.use("/api", requireUser, dashboardRouter(pool));
 
 
 // -------------------------------------------------------------------
