@@ -78,6 +78,64 @@ export function dashboardRouter(pool) {
     });
 
     // ------------------------------------------------------------
+    // GET /api/dashboard/devices
+    // list devices accessible to current user
+    // ------------------------------------------------------------
+    router.get("/dashboard/devices", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "user_not_found",
+                    message: "Logged-in user does not exist in users_tb.",
+                });
+            }
+
+            const [rows] = await pool.query(
+                `
+                    SELECT
+                        d.device_id,
+                        d.device_uid,
+                        d.device_name,
+                        d.device_type,
+                        d.status,
+                        d.last_seen_at,
+                        d.created_at,
+                        d.home_id,
+                        d.room_id,
+                        h.home_name,
+                        r.room_name
+                    FROM devices_tb d
+                             INNER JOIN homes_tb h
+                                        ON h.home_id = d.home_id
+                             INNER JOIN home_memberships_tb hm
+                                        ON hm.home_id = h.home_id
+                             LEFT JOIN rooms_tb r
+                                       ON r.room_id = d.room_id
+                    WHERE hm.user_id = ?
+                    ORDER BY d.created_at ASC, d.device_id ASC
+                `,
+                [user.user_id]
+            );
+
+            return res.json({
+                ok: true,
+                devices: rows,
+            });
+        } catch (e) {
+            console.error("dashboard devices error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not load devices.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
     // GET /api/dashboard/bootstrap
     // homes -> rooms -> devices
     // ------------------------------------------------------------
