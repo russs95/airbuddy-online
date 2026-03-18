@@ -22,6 +22,7 @@ import { deviceRouter } from "./routes/v1/device.js";
 import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
+import { exampleRouter } from "./routes/example.js";
 
 import { landingRouter } from "./pages/landing.js";
 import makeBuwanaRouter from "./routes/buwana.js";
@@ -240,6 +241,13 @@ v1.use(telemetryRouter(pool));
 v1.use(deviceRouter(pool));
 
 app.use("/api/v1", v1);
+
+
+// -------------------------------------------------------------------
+// PUBLIC EXAMPLE API (no auth)
+// Must be mounted BEFORE requireUser so it isn't blocked.
+// -------------------------------------------------------------------
+app.use("/api", exampleRouter(pool));
 
 
 // -------------------------------------------------------------------

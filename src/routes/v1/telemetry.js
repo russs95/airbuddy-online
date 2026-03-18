@@ -56,20 +56,26 @@ function validateTelemetryBody(body) {
 // "Bad zero" gate (ignore obvious boot / invalid readings)
 // ------------------------------------------------------------
 // We treat these as "almost certainly invalid" for AirBuddy when exactly 0.
-// (Some sensors can legitimately produce 0 for TVOC, AQI, etc, so we don't block those.)
+// Some fields like TVOC/AQI can legitimately be 0, so do not block those.
 function isBadZeroTelemetry(values) {
-    if (!values || typeof values !== "object") return "values_missing";
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+        return "values_missing";
+    }
 
-    // Keys where 0 is very likely bogus
+    // Primary suspect fields: exact 0 should never be stored
     const suspectKeys = ["temp_c", "rh_pct", "eco2_ppm"];
 
     for (const k of suspectKeys) {
-        if (values[k] !== undefined && values[k] !== null && Number(values[k]) === 0) {
-            return `invalid_zero_${k}`;
+        const v = values[k];
+        if (v !== undefined && v !== null) {
+            const n = Number(v);
+            if (Number.isFinite(n) && n === 0) {
+                return `invalid_zero_${k}`;
+            }
         }
     }
 
-    // Optional extra guard: if *all* numeric values provided are exactly 0, ignore.
+    // If ALL numeric values in payload are exactly zero, ignore.
     const numericPairs = Object.entries(values).filter(([, v]) => {
         const n = Number(v);
         return Number.isFinite(n);
@@ -94,12 +100,26 @@ export function telemetryRouter(pool) {
     router.post("/telemetry", async (req, res) => {
         const err = validateTelemetryBody(req.body);
         if (err) {
-            return res.status(400).json({ ok: false, error: "bad_payload", message: err });
+            return res.status(400).json({
+                ok: false,
+                error: "bad_payload",
+                message: err
+            });
         }
+
+        const deviceId = req.device.device_id;
+        const deviceUid = req.device.device_uid || null;
 
         // Ignore obvious bogus boot readings (do NOT store in DB)
         const zeroErr = isBadZeroTelemetry(req.body.values);
         if (zeroErr) {
+            console.log(
+                "telemetry ignored:",
+                deviceUid || deviceId,
+                zeroErr,
+                JSON.stringify(req.body.values)
+            );
+
             // 202: accepted but intentionally not stored
             return res.status(202).json({
                 ok: true,
@@ -109,10 +129,7 @@ export function telemetryRouter(pool) {
             });
         }
 
-        const deviceId = req.device.device_id;
-
         // Keep unix seconds as-is and let MySQL convert it.
-        // This avoids Node timezone formatting bugs.
         const recordedAtUnix = req.body.recorded_at;
 
         const lat = req.body.lat ?? null;
@@ -128,7 +145,6 @@ export function telemetryRouter(pool) {
         try {
             await conn.beginTransaction();
 
-            // Force this session into UTC so FROM_UNIXTIME() is unambiguous.
             try {
                 await conn.query("SET time_zone = '+00:00'");
             } catch {
@@ -139,7 +155,7 @@ export function telemetryRouter(pool) {
             try {
                 await conn.query(
                     `
-                    INSERT INTO telemetry_readings_tb
+                        INSERT INTO telemetry_readings_tb
                         (
                             device_id,
                             recorded_at,
@@ -151,18 +167,18 @@ export function telemetryRouter(pool) {
                             confidence_json,
                             flags_json
                         )
-                    VALUES
-                        (
-                            ?,
-                            FROM_UNIXTIME(?),
-                            UTC_TIMESTAMP(),
-                            ?,
-                            ?,
-                            ?,
-                            CAST(? AS JSON),
-                            CAST(? AS JSON),
-                            CAST(? AS JSON)
-                        )
+                        VALUES
+                            (
+                                ?,
+                                FROM_UNIXTIME(?),
+                                UTC_TIMESTAMP(),
+                                ?,
+                                ?,
+                                ?,
+                                CAST(? AS JSON),
+                                CAST(? AS JSON),
+                                CAST(? AS JSON)
+                            )
                     `,
                     [deviceId, recordedAtUnix, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
                 );
