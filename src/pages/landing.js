@@ -171,7 +171,7 @@ async function fetchDeviceInfo(pool, deviceId = 1) {
         FROM devices_tb d
                  LEFT JOIN homes_tb h ON h.home_id = d.home_id
                  LEFT JOIN rooms_tb r ON r.room_id = d.room_id
-                 LEFT JOIN users_tb u ON u.buwana_id = d.claimed_by_buwana_id
+                 LEFT JOIN users_tb u ON u.user_id = d.claimed_by_user_id
                  LEFT JOIN communities_tb c ON c.community_id = u.community_id
         WHERE d.device_id = ?
             LIMIT 1
