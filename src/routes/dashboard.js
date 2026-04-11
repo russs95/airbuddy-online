@@ -774,12 +774,15 @@ export function dashboardRouter(pool) {
                 home_name: device.home_name,
                 recorded_at: row.recorded_at,
                 received_at: row.received_at,
-                eco2_ppm: values.eco2_ppm ?? null,
-                temp_c: values.temp_c ?? null,
-                rtc_temp_c: values.rtc_temp_c ?? null,
-                rh_pct: values.rh_pct ?? null,
-                aqi: values.aqi ?? null,
-                tvoc_ppb: values.tvoc_ppb ?? null,
+                ens_eco2:     values.ens_eco2     ?? null,
+                ens_tvoc:     values.ens_tvoc     ?? null,
+                ens_aqi:      values.ens_aqi      ?? null,
+                aht_temp:     values.aht_temp     ?? null,
+                aht_humidity: values.aht_humidity ?? null,
+                rtc_temp:     values.rtc_temp     ?? null,
+                scd_co2:      values.scd_co2      ?? null,
+                scd_temp:     values.scd_temp     ?? null,
+                scd_humidity: values.scd_humidity ?? null,
                 confidence,
                 flags,
             });
@@ -834,11 +837,19 @@ export function dashboardRouter(pool) {
                 `
                     SELECT
                         UNIX_TIMESTAMP(recorded_at) AS ts,
-                        CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE) AS eco2,
-                        CAST(JSON_EXTRACT(values_json, '$.temp_c') AS DOUBLE) AS temp,
-                        CAST(JSON_EXTRACT(values_json, '$.rtc_temp_c') AS DOUBLE) AS rtc_temp,
-                        CAST(JSON_EXTRACT(values_json, '$.rh_pct') AS DOUBLE) AS rh,
-                        CAST(JSON_EXTRACT(values_json, '$.tvoc_ppb') AS DOUBLE) AS tvoc
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.ens_eco2') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE)) AS ens_eco2,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.aht_temp') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.temp_c') AS DOUBLE))   AS aht_temp,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.rtc_temp') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.rtc_temp_c') AS DOUBLE)) AS rtc_temp,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.aht_humidity') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.rh_pct') AS DOUBLE))   AS aht_humidity,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.ens_tvoc') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.tvoc_ppb') AS DOUBLE)) AS ens_tvoc,
+                        CAST(JSON_EXTRACT(values_json, '$.scd_co2')      AS DOUBLE)       AS scd_co2,
+                        CAST(JSON_EXTRACT(values_json, '$.scd_temp')     AS DOUBLE)       AS scd_temp,
+                        CAST(JSON_EXTRACT(values_json, '$.scd_humidity') AS DOUBLE)       AS scd_humidity
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
                       AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
@@ -847,20 +858,26 @@ export function dashboardRouter(pool) {
                 [device.device_id, hours]
             );
 
-            const timestamps = [];
-            const eco2s = [];
-            const temps = [];
-            const rtcTemps = [];
-            const rhs = [];
-            const tvocs = [];
+            const timestamps    = [];
+            const ensEco2s      = [];
+            const ahtTemps      = [];
+            const rtcTemps      = [];
+            const ahtHumidities = [];
+            const ensTvocs      = [];
+            const scdCo2s       = [];
+            const scdTemps      = [];
+            const scdHumidities = [];
 
             for (const r of rows) {
-                timestamps.push(r.ts == null ? null : Number(r.ts));
-                eco2s.push(r.eco2 == null ? null : Number(r.eco2));
-                temps.push(r.temp == null ? null : Number(r.temp));
-                rtcTemps.push(r.rtc_temp == null ? null : Number(r.rtc_temp));
-                rhs.push(r.rh == null ? null : Number(r.rh));
-                tvocs.push(r.tvoc == null ? null : Number(r.tvoc));
+                timestamps.push(r.ts           == null ? null : Number(r.ts));
+                ensEco2s.push(r.ens_eco2       == null ? null : Number(r.ens_eco2));
+                ahtTemps.push(r.aht_temp       == null ? null : Number(r.aht_temp));
+                rtcTemps.push(r.rtc_temp       == null ? null : Number(r.rtc_temp));
+                ahtHumidities.push(r.aht_humidity == null ? null : Number(r.aht_humidity));
+                ensTvocs.push(r.ens_tvoc       == null ? null : Number(r.ens_tvoc));
+                scdCo2s.push(r.scd_co2         == null ? null : Number(r.scd_co2));
+                scdTemps.push(r.scd_temp       == null ? null : Number(r.scd_temp));
+                scdHumidities.push(r.scd_humidity == null ? null : Number(r.scd_humidity));
             }
 
             return res.json({
@@ -871,11 +888,14 @@ export function dashboardRouter(pool) {
                 home_name: device.home_name,
                 hours,
                 timestamps,
-                eco2s,
-                temps,
+                ensEco2s,
+                ahtTemps,
                 rtcTemps,
-                rhs,
-                tvocs,
+                ahtHumidities,
+                ensTvocs,
+                scdCo2s,
+                scdTemps,
+                scdHumidities,
             });
         } catch (e) {
             console.error("device trends error:", e && (e.stack || e.message || e));
