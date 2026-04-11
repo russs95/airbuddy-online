@@ -63,7 +63,7 @@ function isBadZeroTelemetry(values) {
     }
 
     // Primary suspect fields: exact 0 should never be stored
-    const suspectKeys = ["temp_c", "rh_pct", "eco2_ppm"];
+    const suspectKeys = ["aht_temp", "aht_humidity", "ens_eco2"];
 
     for (const k of suspectKeys) {
         const v = values[k];
@@ -224,11 +224,16 @@ export function telemetryRouter(pool) {
                 `
                     SELECT
                         UNIX_TIMESTAMP(recorded_at) AS ts,
-                        CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE) AS eco2,
-                        CAST(JSON_EXTRACT(values_json, '$.temp_c') AS DOUBLE) AS temp,
-                        CAST(JSON_EXTRACT(values_json, '$.rtc_temp_c') AS DOUBLE) AS rtc_temp,
-                        CAST(JSON_EXTRACT(values_json, '$.rh_pct') AS DOUBLE) AS rh,
-                        CAST(JSON_EXTRACT(values_json, '$.tvoc_ppb') AS DOUBLE) AS tvoc
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.ens_eco2') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE)) AS eco2,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.aht_temp') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.temp_c') AS DOUBLE)) AS temp,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.rtc_temp') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.rtc_temp_c') AS DOUBLE)) AS rtc_temp,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.aht_humidity') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.rh_pct') AS DOUBLE)) AS rh,
+                        COALESCE(CAST(JSON_EXTRACT(values_json, '$.ens_tvoc') AS DOUBLE),
+                                 CAST(JSON_EXTRACT(values_json, '$.tvoc_ppb') AS DOUBLE)) AS tvoc
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
                       AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
