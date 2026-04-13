@@ -172,6 +172,12 @@ export function authRouter(pool) {
         url.searchParams.set("code_challenge", codeChallenge);
         url.searchParams.set("code_challenge_method", "S256");
 
+        // Forward client-supplied mode preference to Buwana login page
+        const mode = req.query.mode;
+        if (mode === "light" || mode === "dark") {
+            url.searchParams.set("mode", mode);
+        }
+
         return res.redirect(url.toString());
     });
 
