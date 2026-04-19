@@ -727,6 +727,8 @@ export function dashboardRouter(pool) {
                 SELECT
                     recorded_at,
                     received_at,
+                    lat,
+                    lon,
                     values_json,
                     confidence_json,
                     flags_json
@@ -747,6 +749,8 @@ export function dashboardRouter(pool) {
                     home_name: device.home_name,
                     recorded_at: null,
                     received_at: null,
+                    lat: null,
+                    lon: null,
                     ens_eco2: null,
                     ens_tvoc: null,
                     ens_aqi: null,
@@ -774,6 +778,8 @@ export function dashboardRouter(pool) {
                 home_name: device.home_name,
                 recorded_at: row.recorded_at,
                 received_at: row.received_at,
+                lat: row.lat != null ? Number(row.lat) : null,
+                lon: row.lon != null ? Number(row.lon) : null,
                 ens_eco2:     values.ens_eco2     ?? null,
                 ens_tvoc:     values.ens_tvoc     ?? null,
                 ens_aqi:      values.ens_aqi      ?? null,
