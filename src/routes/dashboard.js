@@ -760,6 +760,10 @@ export function dashboardRouter(pool) {
                     scd_co2: null,
                     scd_temp: null,
                     scd_humidity: null,
+                    ina_bus_v: null,
+                    ina_current_ma: null,
+                    ina_power_mw: null,
+                    ina_batt_pct: null,
                     confidence: null,
                     flags: null,
                 });
@@ -789,6 +793,10 @@ export function dashboardRouter(pool) {
                 scd_co2:      values.scd_co2      ?? null,
                 scd_temp:     values.scd_temp     ?? null,
                 scd_humidity: values.scd_humidity ?? null,
+                ina_bus_v:      values.ina_bus_v      ?? null,
+                ina_current_ma: values.ina_current_ma ?? null,
+                ina_power_mw:   values.ina_power_mw   ?? null,
+                ina_batt_pct:   values.ina_batt_pct   ?? null,
                 confidence,
                 flags,
             });
@@ -855,7 +863,11 @@ export function dashboardRouter(pool) {
                                  CAST(JSON_EXTRACT(values_json, '$.tvoc_ppb') AS DOUBLE)) AS ens_tvoc,
                         CAST(JSON_EXTRACT(values_json, '$.scd_co2')      AS DOUBLE)       AS scd_co2,
                         CAST(JSON_EXTRACT(values_json, '$.scd_temp')     AS DOUBLE)       AS scd_temp,
-                        CAST(JSON_EXTRACT(values_json, '$.scd_humidity') AS DOUBLE)       AS scd_humidity
+                        CAST(JSON_EXTRACT(values_json, '$.scd_humidity') AS DOUBLE)       AS scd_humidity,
+                        CAST(JSON_EXTRACT(values_json, '$.ina_bus_v')      AS DOUBLE)     AS ina_bus_v,
+                        CAST(JSON_EXTRACT(values_json, '$.ina_current_ma') AS DOUBLE)     AS ina_current_ma,
+                        CAST(JSON_EXTRACT(values_json, '$.ina_power_mw')   AS DOUBLE)     AS ina_power_mw,
+                        CAST(JSON_EXTRACT(values_json, '$.ina_batt_pct')   AS DOUBLE)     AS ina_batt_pct
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
                       AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
@@ -873,6 +885,10 @@ export function dashboardRouter(pool) {
             const scdCo2s       = [];
             const scdTemps      = [];
             const scdHumidities = [];
+            const inaBusVs      = [];
+            const inaCurrentMas = [];
+            const inaPowerMws   = [];
+            const inaBattPcts   = [];
 
             for (const r of rows) {
                 timestamps.push(r.ts           == null ? null : Number(r.ts));
@@ -884,6 +900,10 @@ export function dashboardRouter(pool) {
                 scdCo2s.push(r.scd_co2         == null ? null : Number(r.scd_co2));
                 scdTemps.push(r.scd_temp       == null ? null : Number(r.scd_temp));
                 scdHumidities.push(r.scd_humidity == null ? null : Number(r.scd_humidity));
+                inaBusVs.push(r.ina_bus_v         == null ? null : Number(r.ina_bus_v));
+                inaCurrentMas.push(r.ina_current_ma == null ? null : Number(r.ina_current_ma));
+                inaPowerMws.push(r.ina_power_mw    == null ? null : Number(r.ina_power_mw));
+                inaBattPcts.push(r.ina_batt_pct    == null ? null : Number(r.ina_batt_pct));
             }
 
             return res.json({
@@ -902,6 +922,10 @@ export function dashboardRouter(pool) {
                 scdCo2s,
                 scdTemps,
                 scdHumidities,
+                inaBusVs,
+                inaCurrentMas,
+                inaPowerMws,
+                inaBattPcts,
             });
         } catch (e) {
             console.error("device trends error:", e && (e.stack || e.message || e));
