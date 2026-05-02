@@ -275,10 +275,15 @@ app.use((err, req, res, next) => {
 
     await initDbSession();
 
-    app.listen(Number(PORT), "127.0.0.1", () => {
+    const server = app.listen(Number(PORT), "127.0.0.1", () => {
         console.log(
             `AirBuddy Online API listening on http://127.0.0.1:${PORT} (TZ=${process.env.TZ}, DB_TZ=${MYSQL_SESSION_TZ})`
         );
     });
+
+    // Close sockets that go silent mid-request (e.g. device drops WiFi while
+    // a POST is in flight). Node.js default is no timeout, which leaves those
+    // connections open indefinitely and slowly exhausts the connection pool.
+    server.setTimeout(10000);
 
 })();
