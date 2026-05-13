@@ -867,7 +867,9 @@ export function dashboardRouter(pool) {
                         CAST(JSON_EXTRACT(values_json, '$.ina_bus_v')      AS DOUBLE)     AS ina_bus_v,
                         CAST(JSON_EXTRACT(values_json, '$.ina_current_ma') AS DOUBLE)     AS ina_current_ma,
                         CAST(JSON_EXTRACT(values_json, '$.ina_power_mw')   AS DOUBLE)     AS ina_power_mw,
-                        CAST(JSON_EXTRACT(values_json, '$.ina_batt_pct')   AS DOUBLE)     AS ina_batt_pct
+                        CAST(JSON_EXTRACT(values_json, '$.ina_batt_pct')   AS DOUBLE)     AS ina_batt_pct,
+                        lat,
+                        lon
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
                       AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
@@ -889,6 +891,8 @@ export function dashboardRouter(pool) {
             const inaCurrentMas = [];
             const inaPowerMws   = [];
             const inaBattPcts   = [];
+            const lats          = [];
+            const lons          = [];
 
             for (const r of rows) {
                 timestamps.push(r.ts           == null ? null : Number(r.ts));
@@ -904,6 +908,8 @@ export function dashboardRouter(pool) {
                 inaCurrentMas.push(r.ina_current_ma == null ? null : Number(r.ina_current_ma));
                 inaPowerMws.push(r.ina_power_mw    == null ? null : Number(r.ina_power_mw));
                 inaBattPcts.push(r.ina_batt_pct    == null ? null : Number(r.ina_batt_pct));
+                lats.push(r.lat == null ? null : Number(r.lat));
+                lons.push(r.lon == null ? null : Number(r.lon));
             }
 
             return res.json({
@@ -926,6 +932,8 @@ export function dashboardRouter(pool) {
                 inaCurrentMas,
                 inaPowerMws,
                 inaBattPcts,
+                lats,
+                lons,
             });
         } catch (e) {
             console.error("device trends error:", e && (e.stack || e.message || e));
