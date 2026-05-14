@@ -751,6 +751,9 @@ export function dashboardRouter(pool) {
                     received_at: null,
                     lat: null,
                     lon: null,
+                    last_gps_lat: null,
+                    last_gps_lon: null,
+                    last_gps_at:  null,
                     ens_eco2: null,
                     ens_tvoc: null,
                     ens_aqi: null,
@@ -774,6 +777,27 @@ export function dashboardRouter(pool) {
             const confidence = parseJsonField(row.confidence_json, null);
             const flags = parseJsonField(row.flags_json, null);
 
+            // If the latest reading has no GPS, find the most recent reading that does
+            let lastGpsLat = row.lat != null ? Number(row.lat) : null;
+            let lastGpsLon = row.lon != null ? Number(row.lon) : null;
+            let lastGpsAt  = row.lat != null ? row.recorded_at : null;
+
+            if (lastGpsLat == null) {
+                const [gpsRows] = await pool.query(
+                    `SELECT lat, lon, recorded_at
+                     FROM telemetry_readings_tb
+                     WHERE device_id = ? AND lat IS NOT NULL AND lon IS NOT NULL
+                     ORDER BY recorded_at DESC
+                     LIMIT 1`,
+                    [device.device_id]
+                );
+                if (gpsRows.length) {
+                    lastGpsLat = Number(gpsRows[0].lat);
+                    lastGpsLon = Number(gpsRows[0].lon);
+                    lastGpsAt  = gpsRows[0].recorded_at;
+                }
+            }
+
             return res.json({
                 ok: true,
                 device_uid: device.device_uid,
@@ -784,6 +808,9 @@ export function dashboardRouter(pool) {
                 received_at: row.received_at,
                 lat: row.lat != null ? Number(row.lat) : null,
                 lon: row.lon != null ? Number(row.lon) : null,
+                last_gps_lat: lastGpsLat,
+                last_gps_lon: lastGpsLon,
+                last_gps_at:  lastGpsAt,
                 ens_eco2:     values.ens_eco2     ?? null,
                 ens_tvoc:     values.ens_tvoc     ?? null,
                 ens_aqi:      values.ens_aqi      ?? null,
@@ -836,7 +863,8 @@ export function dashboardRouter(pool) {
                 });
             }
 
-            const hours = Math.max(1, Math.min(24 * 30, Number(req.query.hours) || 24));
+            const hours = Math.max(0.25, Math.min(24 * 30, Number(req.query.hours) || 24));
+            const intervalSeconds = Math.round(hours * 3600);
 
             const device = await getAccessibleDeviceRow(pool, user.user_id, deviceUid);
             if (!device) {
@@ -873,10 +901,10 @@ export function dashboardRouter(pool) {
                         lon
                     FROM telemetry_readings_tb
                     WHERE device_id = ?
-                      AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR
+                      AND recorded_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND
                     ORDER BY recorded_at ASC
                 `,
-                [device.device_id, hours]
+                [device.device_id, intervalSeconds]
             );
 
             const telemetryIds  = [];
