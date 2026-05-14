@@ -850,6 +850,7 @@ export function dashboardRouter(pool) {
             const [rows] = await pool.query(
                 `
                     SELECT
+                        telemetry_id,
                         UNIX_TIMESTAMP(recorded_at) AS ts,
                         COALESCE(CAST(JSON_EXTRACT(values_json, '$.ens_eco2') AS DOUBLE),
                                  CAST(JSON_EXTRACT(values_json, '$.eco2_ppm') AS DOUBLE)) AS ens_eco2,
@@ -878,6 +879,7 @@ export function dashboardRouter(pool) {
                 [device.device_id, hours]
             );
 
+            const telemetryIds  = [];
             const timestamps    = [];
             const ensEco2s      = [];
             const ahtTemps      = [];
@@ -895,6 +897,7 @@ export function dashboardRouter(pool) {
             const lons          = [];
 
             for (const r of rows) {
+                telemetryIds.push(r.telemetry_id == null ? null : Number(r.telemetry_id));
                 timestamps.push(r.ts           == null ? null : Number(r.ts));
                 ensEco2s.push(r.ens_eco2       == null ? null : Number(r.ens_eco2));
                 ahtTemps.push(r.aht_temp       == null ? null : Number(r.aht_temp));
@@ -919,6 +922,7 @@ export function dashboardRouter(pool) {
                 room_name: device.room_name,
                 home_name: device.home_name,
                 hours,
+                telemetryIds,
                 timestamps,
                 ensEco2s,
                 ahtTemps,
@@ -941,6 +945,71 @@ export function dashboardRouter(pool) {
                 ok: false,
                 error: "server_error",
                 message: "Could not load trend data.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
+    // DELETE /api/dashboard/telemetry/:telemetryId
+    // Delete a specific telemetry reading owned by the logged-in user
+    // ------------------------------------------------------------
+    router.delete("/dashboard/telemetry/:telemetryId", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(401).json({
+                    ok: false,
+                    error: "not_authenticated",
+                    message: "You must be logged in.",
+                });
+            }
+
+            const telemetryId = Number(req.params.telemetryId);
+            if (!Number.isInteger(telemetryId) || telemetryId < 1) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_id",
+                    message: "Invalid telemetry ID.",
+                });
+            }
+
+            // Fetch the reading's device_id, then verify the user has access to that device
+            const [readingRows] = await pool.query(
+                "SELECT device_id FROM telemetry_readings_tb WHERE telemetry_id = ? LIMIT 1",
+                [telemetryId]
+            );
+
+            if (!readingRows.length) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "not_found",
+                    message: "Telemetry reading not found.",
+                });
+            }
+
+            const device = await getAccessibleDeviceById(pool, user.user_id, readingRows[0].device_id);
+            if (!device) {
+                return res.status(403).json({
+                    ok: false,
+                    error: "forbidden",
+                    message: "You do not have access to this device.",
+                });
+            }
+
+            await pool.query(
+                "DELETE FROM telemetry_readings_tb WHERE telemetry_id = ?",
+                [telemetryId]
+            );
+
+            return res.json({ ok: true, message: "Telemetry reading deleted." });
+        } catch (e) {
+            console.error("delete telemetry error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not delete telemetry reading.",
             });
         }
     });
