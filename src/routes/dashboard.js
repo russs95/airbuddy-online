@@ -277,7 +277,8 @@ export function dashboardRouter(pool) {
 
     // ------------------------------------------------------------
     // GET /api/devices/next-uid
-    // Returns the next available device UID based on the global max device_id
+    // Returns the next device UID in the format AB_<userId>_<N+1>
+    // where N is the count of devices already claimed by this user.
     // ------------------------------------------------------------
     router.get("/devices/next-uid", async (req, res) => {
         try {
@@ -292,12 +293,15 @@ export function dashboardRouter(pool) {
                 });
             }
 
-            const [rows] = await pool.query("SELECT MAX(device_id) AS max_id FROM devices_tb");
-            const maxId = Number(rows[0]?.max_id) || 0;
-            const nextId = maxId + 1;
-            const nextUid = `AB_0${nextId}`;
+            const [rows] = await pool.query(
+                "SELECT COUNT(*) AS cnt FROM devices_tb WHERE claimed_by_user_id = ?",
+                [user.user_id]
+            );
+            const count = Number(rows[0]?.cnt) || 0;
+            const nextNumber = count + 1;
+            const nextUid = `AB_${user.user_id}_${nextNumber}`;
 
-            return res.json({ ok: true, next_device_uid: nextUid, next_device_id: nextId });
+            return res.json({ ok: true, next_device_uid: nextUid, next_device_id: nextNumber });
         } catch (e) {
             console.error("next-uid error:", e && (e.stack || e.message || e));
             return res.status(500).json({
