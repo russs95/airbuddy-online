@@ -978,6 +978,170 @@ export function dashboardRouter(pool) {
     });
 
     // ------------------------------------------------------------
+    // POST /api/devices/:deviceId/rename
+    // Update the device_name for a device the user owns
+    // ------------------------------------------------------------
+    router.post("/devices/:deviceId/rename", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "user_not_found",
+                    message: "Logged-in user does not exist in users_tb.",
+                });
+            }
+
+            const deviceId = Number(req.params.deviceId);
+            if (!deviceId) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_device_id",
+                    message: "Valid deviceId is required.",
+                });
+            }
+
+            const newName = String(req.body?.device_name || "").trim();
+            if (!newName) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "missing_device_name",
+                    message: "device_name is required.",
+                });
+            }
+
+            const device = await getAccessibleDeviceById(pool, user.user_id, deviceId);
+            if (!device) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "device_not_found",
+                    message: "Device not found or not accessible.",
+                });
+            }
+
+            await pool.query(
+                "UPDATE devices_tb SET device_name = ? WHERE device_id = ?",
+                [newName, device.device_id]
+            );
+
+            return res.json({
+                ok: true,
+                message: "Device renamed successfully.",
+                device_id: device.device_id,
+                device_name: newName,
+            });
+        } catch (e) {
+            console.error("device rename error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not rename device.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
+    // POST /api/devices/:deviceId/set-location
+    // Pin a lat/lon on the most recent telemetry record so the
+    // device shows a fixed location on the map.  For GPS-less
+    // devices this persists indefinitely because no future reading
+    // will ever supply a non-null lat/lon to displace it.
+    // If no telemetry exists yet, inserts a synthetic position-only
+    // record so device-live can still return a location.
+    // ------------------------------------------------------------
+    router.post("/devices/:deviceId/set-location", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "user_not_found",
+                    message: "Logged-in user does not exist in users_tb.",
+                });
+            }
+
+            const deviceId = Number(req.params.deviceId);
+            if (!deviceId) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_device_id",
+                    message: "Valid deviceId is required.",
+                });
+            }
+
+            const lat = Number(req.body?.lat);
+            const lon = Number(req.body?.lon);
+
+            if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_lat",
+                    message: "lat must be a number between -90 and 90.",
+                });
+            }
+            if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_lon",
+                    message: "lon must be a number between -180 and 180.",
+                });
+            }
+
+            const device = await getAccessibleDeviceById(pool, user.user_id, deviceId);
+            if (!device) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "device_not_found",
+                    message: "Device not found or not accessible.",
+                });
+            }
+
+            // Find the most recent telemetry record and stamp it with the coordinates
+            const [recent] = await pool.query(
+                `SELECT telemetry_id
+                 FROM telemetry_readings_tb
+                 WHERE device_id = ?
+                 ORDER BY recorded_at DESC
+                 LIMIT 1`,
+                [device.device_id]
+            );
+
+            if (recent.length) {
+                await pool.query(
+                    "UPDATE telemetry_readings_tb SET lat = ?, lon = ? WHERE telemetry_id = ?",
+                    [lat, lon, recent[0].telemetry_id]
+                );
+            } else {
+                // No telemetry yet — insert a position-only record
+                await pool.query(
+                    `INSERT INTO telemetry_readings_tb
+                        (device_id, recorded_at, received_at, lat, lon, values_json)
+                     VALUES (?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), ?, ?, '{}')`,
+                    [device.device_id, lat, lon]
+                );
+            }
+
+            return res.json({
+                ok: true,
+                message: "Device location set.",
+                lat,
+                lon,
+            });
+        } catch (e) {
+            console.error("device set-location error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not set device location.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
     // DELETE /api/dashboard/telemetry/:telemetryId
     // Delete a specific telemetry reading owned by the logged-in user
     // ------------------------------------------------------------
