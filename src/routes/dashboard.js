@@ -276,6 +276,39 @@ export function dashboardRouter(pool) {
     });
 
     // ------------------------------------------------------------
+    // GET /api/devices/next-uid
+    // Returns the next available device UID based on the global max device_id
+    // ------------------------------------------------------------
+    router.get("/devices/next-uid", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(401).json({
+                    ok: false,
+                    error: "not_authenticated",
+                    message: "You must be logged in.",
+                });
+            }
+
+            const [rows] = await pool.query("SELECT MAX(device_id) AS max_id FROM devices_tb");
+            const maxId = Number(rows[0]?.max_id) || 0;
+            const nextId = maxId + 1;
+            const nextUid = `AB_0${nextId}`;
+
+            return res.json({ ok: true, next_device_uid: nextUid, next_device_id: nextId });
+        } catch (e) {
+            console.error("next-uid error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not determine next device UID.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
     // POST /api/devices/register
     // Create home/room if needed, then create device + generated key
     // ------------------------------------------------------------
