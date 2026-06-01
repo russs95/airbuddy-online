@@ -211,6 +211,140 @@ export function telemetryRouter(pool) {
     });
 
     // --------------------------------------------------------
+    // POST /api/v1/telemetry/batch  (device-authenticated)
+    // Body: JSON array of standard telemetry payloads.
+    // Drains the device's offline queue in one round-trip.
+    // --------------------------------------------------------
+    router.post("/telemetry/batch", async (req, res) => {
+        if (!Array.isArray(req.body)) {
+            return res.status(400).json({
+                ok: false,
+                error: "bad_payload",
+                message: "Body must be a JSON array of telemetry readings"
+            });
+        }
+
+        const readings = req.body;
+
+        if (readings.length === 0) {
+            return res.status(200).json({
+                ok: true,
+                accepted: 0,
+                ignored: 0,
+                server_now: Math.floor(Date.now() / 1000)
+            });
+        }
+
+        const MAX_BATCH = 1000;
+        if (readings.length > MAX_BATCH) {
+            return res.status(400).json({
+                ok: false,
+                error: "batch_too_large",
+                message: `Batch size ${readings.length} exceeds maximum ${MAX_BATCH}`
+            });
+        }
+
+        const deviceId = req.device.device_id;
+        const deviceUid = req.device.device_uid || null;
+
+        // Pre-classify all readings before touching the DB.
+        const toInsert = [];
+        let ignored = 0;
+
+        for (let i = 0; i < readings.length; i++) {
+            const r = readings[i];
+
+            const validErr = validateTelemetryBody(r);
+            if (validErr) {
+                console.log(`telemetry batch[${i}] invalid:`, deviceUid || deviceId, validErr);
+                ignored++;
+                continue;
+            }
+
+            const zeroErr = isBadZeroTelemetry(r.values);
+            if (zeroErr) {
+                console.log(`telemetry batch[${i}] ignored:`, deviceUid || deviceId, zeroErr);
+                ignored++;
+                continue;
+            }
+
+            toInsert.push(r);
+        }
+
+        if (toInsert.length === 0) {
+            return res.status(202).json({
+                ok: true,
+                accepted: 0,
+                ignored,
+                server_now: Math.floor(Date.now() / 1000)
+            });
+        }
+
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+
+            try {
+                await conn.query("SET time_zone = '+00:00'");
+            } catch {
+                // Ignore; insert may still work correctly depending on server settings
+            }
+
+            let accepted = 0;
+            for (const r of toInsert) {
+                try {
+                    await conn.query(
+                        `INSERT INTO telemetry_readings_tb
+                         (device_id, recorded_at, received_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
+                         VALUES (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
+                        [
+                            deviceId,
+                            r.recorded_at,
+                            r.lat ?? null,
+                            r.lon ?? null,
+                            r.alt_m ?? null,
+                            JSON.stringify(r.values),
+                            r.confidence ? JSON.stringify(r.confidence) : null,
+                            r.flags ? JSON.stringify(r.flags) : null,
+                        ]
+                    );
+                    accepted++;
+                } catch (e) {
+                    if (e.code !== "ER_DUP_ENTRY") throw e;
+                    // Duplicate silently skipped — device may retry after a partial drain
+                }
+            }
+
+            await conn.query(
+                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?",
+                [deviceId]
+            );
+
+            await conn.commit();
+
+            console.log(
+                `telemetry batch: device=${deviceUid || deviceId}`,
+                `accepted=${accepted} ignored=${ignored} total=${readings.length}`
+            );
+
+            return res.status(200).json({
+                ok: true,
+                accepted,
+                ignored,
+                server_now: Math.floor(Date.now() / 1000)
+            });
+        } catch (e) {
+            try {
+                await conn.rollback();
+            } catch {}
+            console.error("telemetry batch error:", e && (e.stack || e?.code || e?.message || e));
+            return res.status(500).json({ ok: false, error: "server_error" });
+        } finally {
+            conn.release();
+        }
+    });
+
+    // --------------------------------------------------------
     // GET /api/v1/trends  (device-authenticated upstream)
     // NOTE: This remains device-authenticated. Browser/user access
     // should use a separate user-auth endpoint later.
