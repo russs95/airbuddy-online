@@ -268,6 +268,17 @@ export function authRouter(pool) {
 
             // Save to session
             req.session.user = user;
+            // Persist the OAuth tokens so user routes can call the Buwana profile
+            // API server-to-server (e.g. /api/profile). The access token is short
+            // lived; refresh_token is kept for a future silent-refresh flow
+            // (see docs/tasks.md). expiresAt is an absolute epoch in ms.
+            req.session.tokens = {
+                accessToken: tokenJson.access_token || null,
+                refreshToken: tokenJson.refresh_token || null,
+                expiresAt: tokenJson.expires_in
+                    ? Date.now() + Number(tokenJson.expires_in) * 1000
+                    : null,
+            };
             delete req.session.buwana;
 
             // Upsert user into users_tb, persisting all claims from the new Buwana scope system.

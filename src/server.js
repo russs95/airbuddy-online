@@ -22,6 +22,7 @@ import { deviceRouter } from "./routes/v1/device.js";
 import { systemRouter } from "./routes/system.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
+import { profileRouter } from "./routes/profile.js";
 import { exampleRouter } from "./routes/example.js";
 
 import { landingRouter } from "./pages/landing.js";
@@ -92,6 +93,10 @@ app.use((req, res, next) => {
 
 app.use(
     helmet({
+        // OSM (and other volunteer tile servers) reject requests with no Referer.
+        // Helmet defaults to `no-referrer`; this sends the bare origin cross-origin
+        // over HTTPS so map tiles load while still suppressing it on downgrades.
+        referrerPolicy: { policy: "strict-origin-when-cross-origin" },
         contentSecurityPolicy: {
             directives: {
                 defaultSrc: ["'self'"],
@@ -257,6 +262,7 @@ app.use("/api", exampleRouter(pool));
 // not device APIs.
 // -------------------------------------------------------------------
 app.use("/api", requireUser, dashboardRouter(pool));
+app.use("/api", requireUser, profileRouter(pool));
 
 
 // -------------------------------------------------------------------
