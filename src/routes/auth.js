@@ -142,6 +142,31 @@ async function verifyIdToken(idToken) {
     return payload;
 }
 
+// Map the session user (which uses DB/claim field names) to the public shape the
+// SPA expects from /api/me. The session stores location/profile fields with a
+// `_name` suffix to match the users_tb columns, but the Nuxt dashboard reads the
+// short OIDC-style names (country, language, community, continent) and the
+// standard names (given_name, family_name). Spread the original first so every
+// other field (location_full, watershed_name, location_lat/long, role, emoji…)
+// passes through untouched, then add the canonical aliases the SPA looks for.
+// Both the old and new keys are returned so nothing depending on either breaks.
+export function toPublicUser(u) {
+    if (!u) return null;
+    return {
+        ...u,
+        // buwana:basic — OIDC-standard identity names
+        given_name: u.given_name ?? u.first_name ?? null,
+        family_name: u.family_name ?? u.last_name ?? null,
+        // buwana:profile
+        country: u.country ?? u.country_name ?? null,
+        language: u.language ?? u.language_name ?? null,
+        // buwana:community
+        community: u.community ?? u.community_name ?? null,
+        // buwana:bioregion
+        continent: u.continent ?? u.continent_name ?? null,
+    };
+}
+
 // ------------------------
 // Router
 // ------------------------
@@ -369,7 +394,7 @@ export function authRouter(pool) {
     router.get("/me", (req, res) => {
         const u = req.session?.user;
         if (!u) return res.status(401).json({ ok: false, error: "unauthorized who am i" });
-        return res.json({ ok: true, user: u });
+        return res.json({ ok: true, user: toPublicUser(u) });
     });
 
     // ✅ Alias so your frontend can just call /api/me
@@ -378,7 +403,7 @@ export function authRouter(pool) {
     router.get("/__me_alias", (req, res) => {
         const u = req.session?.user;
         if (!u) return res.status(401).json({ ok: false, error: "unauthorized me alias" });
-        return res.json({ ok: true, user: u });
+        return res.json({ ok: true, user: toPublicUser(u) });
     });
 
     // Logout

@@ -20,7 +20,7 @@ import { deviceRouter } from "./routes/v1/device.js";
 
 // system + user routes
 import { systemRouter } from "./routes/system.js";
-import { authRouter } from "./routes/auth.js";
+import { authRouter, toPublicUser } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { profileRouter } from "./routes/profile.js";
 import { exampleRouter } from "./routes/example.js";
@@ -223,7 +223,7 @@ app.get("/api/me", (req, res) => {
     if (!u) {
         return res.status(401).json({ ok: false, error: "unauthorized" });
     }
-    return res.json({ ok: true, user: u });
+    return res.json({ ok: true, user: toPublicUser(u) });
 });
 
 
