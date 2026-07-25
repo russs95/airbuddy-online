@@ -11,7 +11,7 @@ Global transparency when it matters.**
 ## Overview
 
 **AirBuddy Online** is the cloud companion to the AirBuddy hardware
-device.
+device.  This where the site's APIs live.
 
 It is designed with a deliberate progression:
 
