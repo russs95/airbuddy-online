@@ -1,8 +1,8 @@
--- MySQL dump 10.13  Distrib 8.0.45, for Linux (x86_64)
+-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)
 --
 -- Host: localhost    Database: AB_db
 -- ------------------------------------------------------
--- Server version	8.0.45-0ubuntu0.24.04.1
+-- Server version	8.0.46-0ubuntu0.24.04.3
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
 /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
@@ -31,6 +31,21 @@ CREATE TABLE `buwana_ref_cache_tb` (
   `fetched_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `expires_at` datetime DEFAULT NULL,
   `last_seen_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `given_name` varchar(120) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `family_name` varchar(120) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `earthling_emoji` varchar(8) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `country` varchar(120) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `language` varchar(80) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `role` varchar(40) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `community_id` int unsigned DEFAULT NULL,
+  `community` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `continent` varchar(80) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `location_full` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `watershed_id` int unsigned DEFAULT NULL,
+  `watershed_name` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `location_watershed` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `location_lat` decimal(10,8) DEFAULT NULL,
+  `location_long` decimal(11,8) DEFAULT NULL,
   PRIMARY KEY (`ref_type`,`ref_id`),
   KEY `idx_ref_expires` (`expires_at`),
   KEY `idx_ref_last_seen` (`last_seen_at`)
@@ -56,7 +71,7 @@ CREATE TABLE `device_keys_tb` (
   KEY `idx_device_keys_device` (`device_id`),
   KEY `idx_device_keys_revoked` (`revoked_at`),
   CONSTRAINT `fk_device_keys_device` FOREIGN KEY (`device_id`) REFERENCES `devices_tb` (`device_id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=38 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -87,7 +102,7 @@ CREATE TABLE `devices_tb` (
   CONSTRAINT `fk_devices_claimed_by_user` FOREIGN KEY (`claimed_by_user_id`) REFERENCES `users_tb` (`user_id`) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT `fk_devices_home` FOREIGN KEY (`home_id`) REFERENCES `homes_tb` (`home_id`) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT `fk_devices_room` FOREIGN KEY (`room_id`) REFERENCES `rooms_tb` (`room_id`) ON DELETE SET NULL ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=12 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -126,7 +141,7 @@ CREATE TABLE `homes_tb` (
   PRIMARY KEY (`home_id`),
   KEY `idx_homes_owner` (`owner_user_id`),
   CONSTRAINT `fk_homes_owner_user` FOREIGN KEY (`owner_user_id`) REFERENCES `users_tb` (`user_id`) ON DELETE RESTRICT ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -142,14 +157,12 @@ CREATE TABLE `rooms_tb` (
   `room_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `floor` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `notes` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `target_temp_c` decimal(4,1) DEFAULT NULL,
-  `target_humidity_pct` decimal(4,1) DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`room_id`),
   UNIQUE KEY `uniq_rooms_home_name` (`home_id`,`room_name`),
   KEY `idx_rooms_home` (`home_id`),
   CONSTRAINT `fk_rooms_home` FOREIGN KEY (`home_id`) REFERENCES `homes_tb` (`home_id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=13 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -190,7 +203,7 @@ CREATE TABLE `telemetry_readings_tb` (
   KEY `idx_telemetry_recorded` (`recorded_at`),
   KEY `idx_telemetry_received` (`received_at`),
   CONSTRAINT `fk_telemetry_device` FOREIGN KEY (`device_id`) REFERENCES `devices_tb` (`device_id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=32103 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -211,6 +224,7 @@ CREATE TABLE `users_tb` (
   `email` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `account_status` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `buwana_account_created_at` datetime DEFAULT NULL COMMENT 'created_at claim from buwana:profile ? Buwana account creation date',
   `role` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'user',
   `gea_status` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'null',
   `terms_of_service` tinyint(1) NOT NULL DEFAULT '0',
@@ -219,10 +233,15 @@ CREATE TABLE `users_tb` (
   `suspended` tinyint(1) NOT NULL DEFAULT '0',
   `profile_pic` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'null',
   `country_id` int DEFAULT NULL,
+  `country_name` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'country claim from buwana:profile ? resolved country name',
   `language_id` varchar(11) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'en',
+  `language_name` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'language claim from buwana:profile ? resolved language name in English',
   `community_id` int DEFAULT NULL,
+  `community_name` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'buwana:community claim ? full name of the user''s primary community',
   `watershed_id` int DEFAULT NULL,
+  `watershed_name` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'watershed_name claim from buwana:bioregion ? watershed name in English',
   `continent_code` varchar(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `continent_name` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'continent claim from buwana:bioregion ? resolved continent name in English',
   `location_full` varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `location_watershed` varchar(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `location_lat` decimal(10,8) DEFAULT NULL,
@@ -232,6 +251,8 @@ CREATE TABLE `users_tb` (
   `deleteable` tinyint(1) NOT NULL DEFAULT '1',
   `earthling_emoji` varchar(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `time_zone` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Etc/GMT',
+  `brikcoin_balance` decimal(15,4) DEFAULT NULL COMMENT 'brikcoin_balance claim from buwana:profile',
+  `connected_app_ids` text COLLATE utf8mb4_unicode_ci COMMENT 'connected_app_ids claim from buwana:profile ? JSON array of connected Buwana app IDs',
   PRIMARY KEY (`user_id`),
   UNIQUE KEY `uniq_users_buwana_sub` (`buwana_sub`),
   UNIQUE KEY `uniq_users_email` (`email`),
@@ -241,7 +262,7 @@ CREATE TABLE `users_tb` (
   KEY `idx_users_language` (`language_id`),
   KEY `idx_users_watershed` (`watershed_id`),
   KEY `idx_users_community` (`community_id`)
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=66 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -253,4 +274,4 @@ CREATE TABLE `users_tb` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-06 14:30:25
+-- Dump completed on 2026-06-28  1:10:50

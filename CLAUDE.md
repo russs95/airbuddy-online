@@ -37,8 +37,16 @@ src/
                              # GET  /api/dashboard/bootstrap     (homes/rooms/devices)
                              # GET  /api/dashboard/device-live
                              # GET  /api/dashboard/device-trends
+                             # GET  /api/dashboard/room-latest   (latest reading per device, batched)
                              # POST /api/devices/register
                              # POST /api/devices/:deviceId/reset-key
+                             # POST /api/devices/:deviceId/rename
+                             # POST /api/devices/:deviceId/set-location
+                             # POST /api/devices/:deviceId/assign-room  (move/unassign a device's room)
+                             # POST /api/rooms                  (create room)
+                             # POST /api/rooms/:roomId/rename
+                             # POST /api/rooms/:roomId/comfort-target  (per-room ideal temp/humidity)
+                             # DELETE /api/rooms/:roomId         (devices unassigned via FK, not deleted)
     system.js                # GET  /api/live   (liveness probe)
                              # GET  /api/health  (liveness + DB check)
                              # GET  /api/me      (alias for auth/me)
