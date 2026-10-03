@@ -47,6 +47,7 @@ src/
                              # POST /api/rooms/:roomId/rename
                              # POST /api/rooms/:roomId/comfort-target  (per-room ideal temp/humidity)
                              # DELETE /api/rooms/:roomId         (devices unassigned via FK, not deleted)
+                             # DELETE /api/devices/:deviceId     (owner/admin only; keys + telemetry cascade)
     system.js                # GET  /api/live   (liveness probe)
                              # GET  /api/health  (liveness + DB check)
                              # GET  /api/me      (alias for auth/me)

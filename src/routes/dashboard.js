@@ -1582,6 +1582,91 @@ export function dashboardRouter(pool) {
     });
 
     // ------------------------------------------------------------
+    // DELETE /api/devices/:deviceId
+    // Permanently delete a device. Its keys and telemetry readings are
+    // removed via the ON DELETE CASCADE foreign keys. Only the user who
+    // claimed the device, or a home owner/admin, may delete it.
+    // ------------------------------------------------------------
+    router.delete("/devices/:deviceId", async (req, res) => {
+        try {
+            const sessionUser = req.session?.user;
+            const user = await getCurrentUserRow(pool, sessionUser);
+
+            if (!user) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "user_not_found",
+                    message: "Logged-in user does not exist in users_tb.",
+                });
+            }
+
+            const deviceId = Number(req.params.deviceId);
+            if (!deviceId) {
+                return res.status(400).json({
+                    ok: false,
+                    error: "invalid_device_id",
+                    message: "Valid deviceId is required.",
+                });
+            }
+
+            const [rows] = await pool.query(
+                `
+                SELECT
+                    d.device_id,
+                    d.device_uid,
+                    d.claimed_by_user_id,
+                    hm.role
+                FROM devices_tb d
+                         INNER JOIN home_memberships_tb hm
+                                    ON hm.home_id = d.home_id
+                WHERE hm.user_id = ?
+                  AND d.device_id = ?
+                    LIMIT 1
+                `,
+                [user.user_id, deviceId]
+            );
+            const device = rows[0];
+
+            if (!device) {
+                return res.status(404).json({
+                    ok: false,
+                    error: "device_not_found",
+                    message: "Device not found or not accessible.",
+                });
+            }
+
+            const canDelete =
+                Number(device.claimed_by_user_id) === Number(user.user_id) ||
+                device.role === "owner" ||
+                device.role === "admin";
+
+            if (!canDelete) {
+                return res.status(403).json({
+                    ok: false,
+                    error: "forbidden",
+                    message: "Only the device owner or a home admin can delete this device.",
+                });
+            }
+
+            await pool.query("DELETE FROM devices_tb WHERE device_id = ?", [device.device_id]);
+
+            return res.json({
+                ok: true,
+                message: "Device deleted.",
+                device_id: device.device_id,
+                device_uid: device.device_uid,
+            });
+        } catch (e) {
+            console.error("device delete error:", e && (e.stack || e.message || e));
+            return res.status(500).json({
+                ok: false,
+                error: "server_error",
+                message: "Could not delete device.",
+            });
+        }
+    });
+
+    // ------------------------------------------------------------
     // POST /api/devices/:deviceId/assign-room
     // Move a device to a different room (or unassign with room_id: null)
     // ------------------------------------------------------------
