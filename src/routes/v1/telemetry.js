@@ -3,6 +3,15 @@ import express from "express";
 import { isFiniteNumber } from "../../utils/http.js";
 
 // ------------------------------------------------------------
+// Firmware version (X-Firmware-Version header, airOS 2.6.3+)
+// ------------------------------------------------------------
+// Returns null when absent or malformed so the stored value is kept.
+function firmwareVersionFromHeader(req) {
+    const v = String(req.get("X-Firmware-Version") || "").trim();
+    return /^[0-9A-Za-z.+-]{1,64}$/.test(v) ? v : null;
+}
+
+// ------------------------------------------------------------
 // Validation
 // ------------------------------------------------------------
 function validateTelemetryBody(body) {
@@ -197,10 +206,10 @@ export function telemetryRouter(pool) {
                 if (e.code !== "ER_DUP_ENTRY") throw e;
             }
 
-            // 2) Update liveness
+            // 2) Update liveness (+ firmware version, when the device reports it)
             await conn.query(
-                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?",
-                [deviceId]
+                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP(), firmware_version = COALESCE(?, firmware_version) WHERE device_id = ?",
+                [firmwareVersionFromHeader(req), deviceId]
             );
 
             await conn.commit();
@@ -328,8 +337,8 @@ export function telemetryRouter(pool) {
             }
 
             await conn.query(
-                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP() WHERE device_id = ?",
-                [deviceId]
+                "UPDATE devices_tb SET last_seen_at = UTC_TIMESTAMP(), firmware_version = COALESCE(?, firmware_version) WHERE device_id = ?",
+                [firmwareVersionFromHeader(req), deviceId]
             );
 
             await conn.commit();

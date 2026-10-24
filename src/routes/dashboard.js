@@ -164,6 +164,7 @@ export function dashboardRouter(pool) {
                     d.device_uid,
                     d.device_name,
                     d.device_type,
+                    d.firmware_version,
                     d.status,
                     d.last_seen_at,
                     d.created_at,
