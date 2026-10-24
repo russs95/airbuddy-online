@@ -8,7 +8,15 @@ import { isFiniteNumber } from "../../utils/http.js";
 function validateTelemetryBody(body) {
     if (!body || typeof body !== "object") return "Body must be a JSON object";
 
-    const { recorded_at, values, confidence, flags, lat, lon, alt_m } = body;
+    const { schema, recorded_at, values, confidence, flags, lat, lon, alt_m } = body;
+
+    // Telemetry JSON version (shared turtleOS/airOS data dictionary).
+    // Absent = v1; firmware 2.6+ sends 2.
+    if (schema !== undefined && schema !== null) {
+        if (!Number.isInteger(schema) || schema < 1 || schema > 255) {
+            return "`schema` must be a positive integer if provided";
+        }
+    }
 
     if (typeof recorded_at !== "number" || !Number.isFinite(recorded_at)) {
         return "`recorded_at` must be a unix timestamp number (seconds)";
@@ -132,6 +140,7 @@ export function telemetryRouter(pool) {
         // Keep unix seconds as-is and let MySQL convert it.
         const recordedAtUnix = req.body.recorded_at;
 
+        const schemaVersion = req.body.schema ?? null;   // NULL = v1
         const lat = req.body.lat ?? null;
         const lon = req.body.lon ?? null;
         const altM = req.body.alt_m ?? null;
@@ -160,6 +169,7 @@ export function telemetryRouter(pool) {
                             device_id,
                             recorded_at,
                             received_at,
+                            schema_version,
                             lat,
                             lon,
                             alt_m,
@@ -175,12 +185,13 @@ export function telemetryRouter(pool) {
                                 ?,
                                 ?,
                                 ?,
+                                ?,
                                 CAST(? AS JSON),
                                 CAST(? AS JSON),
                                 CAST(? AS JSON)
                             )
                     `,
-                    [deviceId, recordedAtUnix, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
+                    [deviceId, recordedAtUnix, schemaVersion, lat, lon, altM, valuesJson, confidenceJson, flagsJson]
                 );
             } catch (e) {
                 if (e.code !== "ER_DUP_ENTRY") throw e;
@@ -295,11 +306,12 @@ export function telemetryRouter(pool) {
                 try {
                     await conn.query(
                         `INSERT INTO telemetry_readings_tb
-                         (device_id, recorded_at, received_at, lat, lon, alt_m, values_json, confidence_json, flags_json)
-                         VALUES (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
+                         (device_id, recorded_at, received_at, schema_version, lat, lon, alt_m, values_json, confidence_json, flags_json)
+                         VALUES (?, FROM_UNIXTIME(?), UTC_TIMESTAMP(), ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON))`,
                         [
                             deviceId,
                             r.recorded_at,
+                            r.schema ?? null,
                             r.lat ?? null,
                             r.lon ?? null,
                             r.alt_m ?? null,

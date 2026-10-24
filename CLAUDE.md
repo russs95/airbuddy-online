@@ -91,7 +91,7 @@ Two completely separate auth systems:
 |-------|---------|
 | `devices_tb` | Device registry (device_uid, status, home_id, room_id, firmware_version, last_seen_at) |
 | `device_keys_tb` | Hashed API keys (key_hash, device_id, revoked_at) |
-| `telemetry_readings_tb` | Sensor data (device_id, recorded_at, received_at, values_json, confidence_json, flags_json, lat, lon, alt_m) |
+| `telemetry_readings_tb` | Sensor data (device_id, recorded_at, received_at, schema_version, values_json, confidence_json, flags_json, lat, lon, alt_m) |
 | `users_tb` | Users (buwana_sub UNIQUE, buwana_id, email, first_name, last_name, full_name, time_zone) |
 | `homes_tb` | Homes (home_id, home_name, owner_user_id, privacy_level, time_zone) |
 | `rooms_tb` | Rooms (room_id, home_id, room_name, floor, notes) |
@@ -107,9 +107,12 @@ The `POST /api/v1/telemetry` endpoint applies these before storing:
 2. **Bad-zero filter**: Readings where temp, humidity, or CO2 are exactly `0` are treated as boot garbage → returns `202 Accepted` (not stored)
 3. **Duplicate handling**: Unique constraint on `(device_id, recorded_at)` — duplicates silently ignored
 4. **last_seen_at**: Always updated on any valid ingest, even if reading is filtered
+5. **schema**: optional top-level integer, the telemetry JSON version (airOS 2.6+ sends `2`). Stored in `schema_version`; NULL = v1. Field names and meanings follow the shared data dictionary in turtleOS `docs/wrangler/README.md`. Migration `005_telemetry_schema.sql` must run before the ingest code that writes it.
 
 Sensor fields (stored as JSON in `values_json`):
-- `eco2_ppm`, `temp_c`, `rh_pct`, `tvoc_ppb`, `aqi`, `rtc_temp_c`
+- Current airOS keys: `ens_eco2`, `ens_tvoc`, `ens_aqi`, `aht_temp`, `aht_humidity`, `bme_temp`/`bme_humidity`/`bme_pressure`, `scd_co2`/`scd_temp`/`scd_humidity`, `rtc_temp`, `ina_bus_v`/`ina_current_ma`/`ina_power_mw`/`ina_batt_pct`. Units and meanings: the shared data dictionary in turtleOS `docs/wrangler/README.md`.
+- `ina_current_ma` is the INA219's raw sign: **negative = charging**. Convert at the point of use (airbuddy-spa `app/lib/batteryCurrent.ts`).
+- Legacy keys from early firmware, read-only fallbacks in `/trends`: `eco2_ppm`, `temp_c`, `rh_pct`, `tvoc_ppb`, `aqi`, `rtc_temp_c`.
 
 ## Device Registration Flow
 
