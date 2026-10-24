@@ -21,12 +21,24 @@ const BUWANA_SCOPE = process.env.BUWANA_SCOPE || "openid buwana:basic buwana:pro
 // If you know exact issuer string, set it. Otherwise leave blank to skip issuer check.
 const BUWANA_ISSUER = process.env.BUWANA_ISSUER || "";
 
-// Where to send the user after login
+// Site the user is sent back to after login. The path comes from the
+// ?return_to= passed to /api/auth/login, defaulting to the dashboard.
 const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://air2.earthen.io/";
+const DEFAULT_POST_LOGIN_PATH = "/dashboard";
 
 // ------------------------
 // Small helpers
 // ------------------------
+
+// Only accept same-site relative paths ("/dashboard", "/profile?x=1") so
+// return_to can't be used as an open redirect ("//evil.com", "https://...").
+function safeReturnPath(raw) {
+    if (typeof raw !== "string") return null;
+    if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return null;
+    if (raw.startsWith("/api/")) return null;
+    return raw;
+}
+
 function b64url(buf) {
     return Buffer.from(buf)
         .toString("base64")
@@ -184,6 +196,7 @@ export function authRouter(pool) {
             codeVerifier,
             state,
             nonce,
+            returnTo: safeReturnPath(req.query.return_to) || DEFAULT_POST_LOGIN_PATH,
             createdAt: Date.now(),
         };
 
@@ -304,6 +317,7 @@ export function authRouter(pool) {
                     ? Date.now() + Number(tokenJson.expires_in) * 1000
                     : null,
             };
+            const returnTo = safeReturnPath(sess.returnTo) || DEFAULT_POST_LOGIN_PATH;
             delete req.session.buwana;
 
             // Upsert user into users_tb, persisting all claims from the new Buwana scope system.
@@ -383,7 +397,7 @@ export function authRouter(pool) {
                 console.error("[auth] users_tb upsert failed:", e?.code || e?.message || e);
             }
 
-            return res.redirect(POST_LOGIN_REDIRECT);
+            return res.redirect(new URL(returnTo, POST_LOGIN_REDIRECT).toString());
         } catch (e) {
             console.error("auth callback error:", e && (e.stack || e.message || e));
             return res.status(500).type("text").send("auth_callback_failed");

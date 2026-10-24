@@ -151,7 +151,7 @@ BUWANA_REDIRECT_URI=https://air2.earthen.io/api/auth/callback
 BUWANA_SCOPE=openid profile email
 BUWANA_ISSUER=           # Optional — for JWT iss validation
 BUWANA_API_URL=https://buwana.ecobricks.org   # Profile API base (GET/POST /api/profile)
-POST_LOGIN_REDIRECT=https://air2.earthen.io/
+POST_LOGIN_REDIRECT=https://air2.earthen.io/   # Site origin; path comes from /api/auth/login?return_to= (default /dashboard)
 
 # Buwana sync webhook
 BUWANA_SYNC_SECRET=      # Shared secret — matched against X-Buwana-Secret header
